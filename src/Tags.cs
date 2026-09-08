@@ -124,8 +124,17 @@ namespace Aurora
             {
                 using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
-                    buf = new byte[fs.Length];
-                    if (fs.Read(buf, 0, buf.Length) != buf.Length) return null;
+                    // 元数据(moov)通常在文件开头；限制读取前 16MB，防止超大文件 OOM
+                    int readLen = (int)Math.Min(fs.Length, 16 * 1024 * 1024);
+                    buf = new byte[readLen];
+                    int n = 0;
+                    while (n < readLen)
+                    {
+                        int r = fs.Read(buf, n, readLen - n);
+                        if (r <= 0) break;
+                        n += r;
+                    }
+                    if (n < readLen) { var t2 = new byte[n]; Array.Copy(buf, t2, n); buf = t2; }
                 }
             }
             catch { return null; }
@@ -402,8 +411,8 @@ namespace Aurora
                     if (id == "fmt " && size >= 16)
                     {
                         var fmt = new byte[Math.Min(size, 40)];
-                        fs.Read(fmt, 0, fmt.Length);
-                        byteRate = TagsUtil.Le32(fmt, 8);
+                        int read = fs.Read(fmt, 0, fmt.Length);
+                        if (read >= 12) byteRate = TagsUtil.Le32(fmt, 8);
                     }
                     else if (id == "data")
                     {

@@ -41,6 +41,7 @@ namespace Aurora
         const int WM_NCLBUTTONDOWN = 0xA1;
         const int HTCAPTION = 0x2;
 
+        [STAThread]
         static void Main(string[] args)
         {
             try { SetProcessDPIAware(); } catch { }
@@ -48,19 +49,52 @@ namespace Aurora
             // ---- 静默模式 ----
             bool silent = false, assoc = true, desktop = true;
             string dir = DefaultDir();
-            foreach (string a in args)
+            // 正确处理 /D= 路径含空格和引号的边界情况
+            for (int i = 0; i < args.Length; i++)
             {
-                string arg = a.Trim('"');
+                string arg = args[i];
+                if (string.IsNullOrEmpty(arg)) continue;
                 if (string.Equals(arg, "/S", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(arg, "/silent", StringComparison.OrdinalIgnoreCase)) silent = true;
-                else if (arg.StartsWith("/D=", StringComparison.OrdinalIgnoreCase)) dir = arg.Substring(3).Trim('"');
+                    string.Equals(arg, "/silent", StringComparison.OrdinalIgnoreCase))
+                    silent = true;
+                else if (arg.StartsWith("/D=", StringComparison.OrdinalIgnoreCase))
+                {
+                    string pathPart = arg.Substring(3);
+                    if (pathPart.StartsWith("\"") && pathPart.EndsWith("\"") && pathPart.Length >= 2)
+                        dir = pathPart.Trim('"');
+                    else if (pathPart.StartsWith("\"") && !pathPart.EndsWith("\""))
+                    {
+                        string combined = pathPart.Substring(1);
+                        while (i + 1 < args.Length)
+                        {
+                            i++;
+                            string next = args[i];
+                            if (next.EndsWith("\"")) { combined += " " + next.Substring(0, next.Length - 1); break; }
+                            combined += " " + next;
+                        }
+                        dir = combined;
+                    }
+                    else if (!pathPart.StartsWith("\""))
+                    {
+                        string combined = pathPart;
+                        while (i + 1 < args.Length && !args[i + 1].StartsWith("/"))
+                        { i++; combined += " " + args[i]; }
+                        dir = combined.Trim('"');
+                    }
+                    else dir = pathPart.Trim('"');
+                    dir = dir.TrimEnd('\\', '/', ' ', '\t');
+                    if (dir.Length == 2 && char.IsLetter(dir[0]) && dir[1] == ':') dir += "\\";
+                }
                 else if (string.Equals(arg, "/noassoc", StringComparison.OrdinalIgnoreCase)) assoc = false;
                 else if (string.Equals(arg, "/nodesktop", StringComparison.OrdinalIgnoreCase)) desktop = false;
             }
 
             if (silent)
             {
-                try { RunInstall(dir, desktop, assoc, null); Environment.Exit(0); }
+                string[] silentExts = assoc
+                    ? new[] { ".mp3", ".m4a", ".flac", ".wav", ".ogg", ".oga", ".aac", ".opus", ".wma" }
+                    : null;
+                try { RunInstall(dir, desktop, silentExts, null); Environment.Exit(0); }
                 catch (Exception ex) { MessageBox.Show(ex.Message, "Aurora 安装失败"); Environment.Exit(1); }
                 return;
             }
@@ -118,7 +152,7 @@ namespace Aurora
             }
         }
 
-        static void RunInstall(string dirRaw, bool desktopShortcut, bool associateMp3, Action<int, string> progress)
+        static void RunInstall(string dirRaw, bool desktopShortcut, string[] selectedExts, Action<int, string> progress)
         {
             // 规范化安装目录
             string dir = Path.GetFullPath(dirRaw);
@@ -135,8 +169,21 @@ namespace Aurora
 
             if (progress != null) progress(25, "正在释放程序文件…");
             EmitResource("Aurora.AuroraPlayer.exe", exePath);
+            EmitResource("Aurora.AuroraPlayer.dll", Path.Combine(dir, "AuroraPlayer.dll"));
+            EmitResource("Aurora.AuroraPlayer.runtimeconfig.json", Path.Combine(dir, "AuroraPlayer.runtimeconfig.json"));
+            EmitResource("Aurora.AuroraPlayer.deps.json", Path.Combine(dir, "AuroraPlayer.deps.json"));
             if (progress != null) progress(45, "正在释放卸载器…");
             EmitResource("Aurora.unins.exe", uninsPath);
+            EmitResource("Aurora.unins.runtimeconfig.json", Path.Combine(dir, "unins.runtimeconfig.json"));
+            EmitResource("Aurora.unins.deps.json", Path.Combine(dir, "unins.deps.json"));
+            // 释放第三方依赖 DLL（全部 MIT 许可证）
+            EmitResource("Aurora.NVorbis.dll", Path.Combine(dir, "NVorbis.dll"));
+            EmitResource("Aurora.Concentus.dll", Path.Combine(dir, "Concentus.dll"));
+            EmitResource("Aurora.Concentus.Oggfile.dll", Path.Combine(dir, "Concentus.Oggfile.dll"));
+            EmitResource("Aurora.NAudio.dll", Path.Combine(dir, "NAudio.dll"));
+            EmitResource("Aurora.NAudio.Core.dll", Path.Combine(dir, "NAudio.Core.dll"));
+            EmitResource("Aurora.NAudio.WinMM.dll", Path.Combine(dir, "NAudio.WinMM.dll"));
+            EmitResource("Aurora.NAudio.Wasapi.dll", Path.Combine(dir, "NAudio.Wasapi.dll"));
 
             if (progress != null) progress(60, "正在写入注册表…");
             using (var k = Registry.CurrentUser.CreateSubKey(string.Join(
@@ -150,18 +197,26 @@ namespace Aurora
                 k.SetValue("UninstallString", string.Format("\"{0}\"", uninsPath));
                 k.SetValue("NoModify", 1, RegistryValueKind.DWord);
                 k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-                k.SetValue("EstimatedSize", 640, RegistryValueKind.DWord); // KB
+                // EstimatedSize 按安装目录实际文件合计（KB），始终与真实体积一致
+                long totalBytes = 0;
+                foreach (string f in Directory.GetFiles(dir))
+                {
+                    try { totalBytes += new FileInfo(f).Length; } catch { }
+                }
+                k.SetValue("EstimatedSize", (int)(totalBytes / 1024), RegistryValueKind.DWord); // KB
             }
 
             if (progress != null) progress(80, "正在创建快捷方式…");
             CreateShortcut(exePath, dir, "Aurora Player.lnk", false);
             if (desktopShortcut) CreateShortcut(exePath, dir, "Aurora Player.lnk", true);
 
-            if (associateMp3)
+            if (selectedExts != null && selectedExts.Length > 0)
             {
-                if (progress != null) progress(90, "正在准备 MP3 关联…");
+                if (progress != null) progress(90, "正在准备文件关联…");
                 // 标记文件：播放器首次启动时读取并注册文件关联（见 App.Main）
-                File.WriteAllText(Path.GetFullPath(Path.Combine(dir, ".associate")), "1");
+                // 内容为 "1"（全部 9 种）或逗号分隔的扩展名列表
+                string content = selectedExts.Length >= 9 ? "1" : string.Join(",", selectedExts);
+                File.WriteAllText(Path.GetFullPath(Path.Combine(dir, ".associate")), content);
             }
 
             if (progress != null) progress(100, "安装完成");
@@ -208,6 +263,7 @@ namespace Aurora
             Panel pageWelcome, pageOptions, pageProgress, pageDone;
             ComboBox dirBox;
             CheckBox chkDesktop, chkAssoc, chkRun;
+            CheckBox[] fmtChecks;   // 9 种格式复选框（3x3）
             GradientButton btnNext, btnInstall, btnDone;
             DarkButton btnBack;
             ProgressBar bar;
@@ -378,26 +434,87 @@ namespace Aurora
                 var btnBrowse = new DarkButton { Text = "浏览…", Location = new Point(486, 80) };
                 btnBrowse.Click += (s, e) =>
                 {
-                    using (var dlg = new DirPickerDialog(dirBox.Text))
+                    using (var ofd = new OpenFileDialog())
                     {
-                        if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.SelectedPath))
-                            dirBox.Text = dlg.SelectedPath;
+                        ofd.CheckFileExists = false;
+                        ofd.ValidateNames = false;
+                        ofd.FileName = "安装目录";
+                        ofd.Title = "选择安装文件夹";
+                        if (!string.IsNullOrEmpty(dirBox.Text) && Directory.Exists(dirBox.Text))
+                            ofd.InitialDirectory = dirBox.Text;
+                        // 反射设置 FOS_PICKFOLDERS，启用 Windows 现代文件夹选择对话框
+                        try
+                        {
+                            var fi = typeof(FileDialog).GetField("Options", BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (fi != null)
+                            {
+                                int opts = (int)fi.GetValue(ofd);
+                                fi.SetValue(ofd, opts | 0x20);
+                            }
+                        }
+                        catch { }
+                        if (ofd.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(ofd.FileName))
+                        {
+                            // FOS_PICKFOLDERS 下 FileName 可能带占位符；若不是已存在目录则取父目录
+                            string picked = ofd.FileName;
+                            if (!Directory.Exists(picked)) picked = Path.GetDirectoryName(picked);
+                            dirBox.Text = picked;
+                        }
                     }
                 };
                 chkDesktop = new CheckBox { Text = "创建桌面快捷方式", Checked = defDesktop, Location = new Point(56, 152), AutoSize = true, ForeColor = Color.FromArgb(0x3D, 0x45, 0x57) };
                 chkAssoc = new CheckBox
                 {
-                    Text = "将 Aurora 设为 MP3 默认播放器（推荐）",
+                    Text = "关联音频格式（勾选后双击用 Aurora 打开）",
                     Checked = defAssoc,
                     Location = new Point(56, 186),
                     AutoSize = true,
                     ForeColor = Color.FromArgb(0x3D, 0x45, 0x57),
                 };
+                // 9 种格式 3x3 排列，每个带独立复选框
+                string[] fmtExts = { ".mp3", ".m4a", ".flac", ".wav", ".ogg", ".oga", ".aac", ".opus", ".wma" };
+                string[] fmtNames = { "MP3", "M4A", "FLAC", "WAV", "OGG", "OGA", "AAC", "OPUS", "WMA" };
+                fmtChecks = new CheckBox[9];
+                for (int i = 0; i < 9; i++)
+                {
+                    int row = i / 3, col = i % 3;
+                    fmtChecks[i] = new CheckBox
+                    {
+                        Text = fmtNames[i],
+                        Tag = fmtExts[i],
+                        Checked = defAssoc,
+                        Location = new Point(78 + col * 185, 214 + row * 28),
+                        AutoSize = true,
+                        ForeColor = Color.FromArgb(0x6B, 0x73, 0x86),
+                        Font = new Font("Microsoft YaHei UI", 9f),
+                    };
+                }
+                // 全选开关联动：勾选总开关 → 全选子项；子项全选/取消 → 同步总开关
+                bool suppressLink = false;
+                chkAssoc.CheckedChanged += (s, e) =>
+                {
+                    if (suppressLink) return;
+                    suppressLink = true;
+                    foreach (var cb in fmtChecks) cb.Checked = chkAssoc.Checked;
+                    suppressLink = false;
+                };
+                foreach (var cb in fmtChecks)
+                {
+                    cb.CheckedChanged += (s, e) =>
+                    {
+                        if (suppressLink) return;
+                        bool all = true;
+                        foreach (var c in fmtChecks) if (!c.Checked) { all = false; break; }
+                        suppressLink = true;
+                        chkAssoc.Checked = all;
+                        suppressLink = false;
+                    };
+                }
                 btnBack = new DarkButton { Text = "上一步", Size = new Size(120, 42), Location = new Point(332, 354) };
                 btnBack.Click += (s, e) => ShowPage(pageWelcome);
                 btnInstall = new GradientButton { Text = "立即安装", Size = new Size(120, 42), Location = new Point(464, 354) };
                 btnInstall.Click += (s, e) => StartInstall();
-                pageOptions.Controls.AddRange(new Control[] { l1, dirBox, btnBrowse, chkDesktop, chkAssoc, btnBack, btnInstall });
+                pageOptions.Controls.AddRange(new Control[] { l1, dirBox, btnBrowse, chkDesktop, chkAssoc, fmtChecks[0], fmtChecks[1], fmtChecks[2], fmtChecks[3], fmtChecks[4], fmtChecks[5], fmtChecks[6], fmtChecks[7], fmtChecks[8], btnBack, btnInstall });
 
                 // ---- 进度页 ----
                 pageProgress = NewPage();
@@ -417,17 +534,8 @@ namespace Aurora
                 ok.Location = new Point(Width / 2 - 32, 60);
                 var done = new Label { Text = "安装完成！", Font = new Font("微软雅黑", 18f, FontStyle.Bold), ForeColor = Color.FromArgb(0x1A, 0x20, 0x30), AutoSize = true };
                 done.Location = new Point((Width - done.PreferredWidth) / 2, 150);
-                var hint = new Label
-                {
-                    Text = "双击任意 MP3 文件即可用 Aurora 打开播放\n也可以从开始菜单或桌面快捷方式启动",
-                    ForeColor = Color.FromArgb(0x5A, 0x64, 0x74),
-                    Location = new Point(0, 198),
-                    AutoSize = false,
-                    Size = new Size(Width, 52),
-                    TextAlign = ContentAlignment.TopCenter,
-                };
-                chkRun = new CheckBox { Text = "立即运行 Aurora 极光音乐", Checked = true, Location = new Point(Width / 2 - 96, 268), AutoSize = true, ForeColor = Color.FromArgb(0x3D, 0x45, 0x57) };
-                btnDone = new GradientButton { Text = "完成", Size = new Size(140, 42), Location = new Point(Width / 2 - 70, 320) };
+                chkRun = new CheckBox { Text = "立即运行 Aurora 极光音乐", Checked = true, Location = new Point(Width / 2 - 96, 210), AutoSize = true, ForeColor = Color.FromArgb(0x3D, 0x45, 0x57) };
+                btnDone = new GradientButton { Text = "完成", Size = new Size(140, 42), Location = new Point(Width / 2 - 70, 262) };
                 btnDone.Click += (s, e) =>
                 {
                     if (chkRun.Checked)
@@ -441,7 +549,7 @@ namespace Aurora
                     }
                     Close();
                 };
-                pageDone.Controls.AddRange(new Control[] { ok, done, hint, chkRun, btnDone });
+                pageDone.Controls.AddRange(new Control[] { ok, done, chkRun, btnDone });
 
                 Controls.Add(body);
             }
@@ -471,7 +579,13 @@ namespace Aurora
                 btnClose.Enabled = false;
                 try
                 {
-                    RunInstall(dir, chkDesktop.Checked, chkAssoc.Checked, (pct, msg) =>
+                    // 收集选中的格式扩展名
+                    var sel = new System.Collections.Generic.List<string>();
+                    if (chkAssoc.Checked)
+                        foreach (var cb in fmtChecks)
+                            if (cb.Checked) sel.Add((string)cb.Tag);
+                    string[] selectedExts = sel.Count > 0 ? sel.ToArray() : null;
+                    RunInstall(dir, chkDesktop.Checked, selectedExts, (pct, msg) =>
                     {
                         bar.Value = pct;
                         barLabel.Text = msg;
@@ -606,337 +720,106 @@ namespace Aurora
         void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
     }
 
-    /* ============================ 文件夹浏览对话框 ============================ */
+    /* ============================ 现代文件夹选择对话框 ============================ */
 
-    /// <summary>NSIS 风格的树形文件夹浏览器（桌面/文档/下载/此电脑 → 驱动器 → 目录）。</summary>
-    class DirPickerDialog : Form
+    /// <summary>
+    /// 调用 Windows 现代文件选择对话框（IFileOpenDialog + FOS_PICKFOLDERS），
+    /// 在 Win10/11 上显示与资源管理器一致的文件夹选择界面。
+    /// </summary>
+    static class ModernFolderPicker
     {
-        [DllImport("shell32.dll")]
-        static extern int SHGetKnownFolderPath(ref Guid folderId, uint flags, IntPtr token, out IntPtr path);
+        [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
+        class FileOpenDialogRCW { }
 
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        struct SHFILEINFO
+        [ComImport, Guid("42f85136-db7e-439c-85f1-e4075d135fc8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IFileOpenDialog
         {
-            public IntPtr hIcon;
-            public int iIcon;
-            public uint dwAttributes;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
-            public string szDisplayName;
+            [PreserveSig] int Show(IntPtr parent);
+            [PreserveSig] int SetFileTypes(uint cFileTypes, IntPtr rgFilterSpec);
+            [PreserveSig] int SetFileTypeIndex(uint iFileType);
+            [PreserveSig] int GetFileTypeIndex(out uint piFileType);
+            [PreserveSig] int Advise(IntPtr pfde, out uint pdwCookie);
+            [PreserveSig] int Unadvise(uint dwCookie);
+            [PreserveSig] int SetOptions(FOS fos);
+            [PreserveSig] int GetOptions(out FOS pfos);
+            [PreserveSig] int SetDefaultFolder(IShellItem psi);
+            [PreserveSig] int GetFolder(out IShellItem ppsi);
+            [PreserveSig] int GetCurrentSelection(out IShellItem ppsi);
+            [PreserveSig] int SetFileName([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+            [PreserveSig] int GetFileName([MarshalAs(UnmanagedType.LPWStr)] out string pszName);
+            [PreserveSig] int SetTitle([MarshalAs(UnmanagedType.LPWStr)] string pszTitle);
+            [PreserveSig] int SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string pszText);
+            [PreserveSig] int SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string pszLabel);
+            [PreserveSig] int GetResult(out IShellItem ppsi);
+            [PreserveSig] int AddPlace(IShellItem psi, int alignment);
+            [PreserveSig] int SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string pszDefaultExtension);
+            [PreserveSig] int Close(int hr);
+            [PreserveSig] int SetClientGuid(ref Guid guid);
+            [PreserveSig] int ClearClientData();
+            [PreserveSig] int SetFilter(IntPtr pFilter);
+            [PreserveSig] int GetResults(out IntPtr ppenum);
+            [PreserveSig] int GetSelectedItems(out IntPtr ppsai);
         }
 
-        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-        static extern IntPtr SHGetFileInfo(string pszPath, uint attrs, ref SHFILEINFO info, uint cbSize, uint flags);
-
-        [DllImport("user32.dll")]
-        static extern bool DestroyIcon(IntPtr h);
-
-        [DllImport("dwmapi.dll")]
-        static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
-
-        const uint SHGFI_ICON = 0x100;
-        const uint SHGFI_SMALLICON = 0x1;
-        static readonly string ComputerPath = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
-        static readonly Guid DownloadsId = new Guid("374DE290-123F-4565-9164-39C4925E467B");
-
-        public string SelectedPath;
-        readonly TreeView tree;
-        readonly TextBox pathBox;
-        readonly ImageList icons = new ImageList { ImageSize = new Size(16, 16), ColorDepth = ColorDepth.Depth32Bit };
-        readonly Dictionary<string, string> iconKeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        readonly string initialPath;
-
-        protected override void OnHandleCreated(EventArgs e)
+        [ComImport, Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IShellItem
         {
-            base.OnHandleCreated(e);
+            [PreserveSig] int BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+            [PreserveSig] int GetParent(out IShellItem ppsi);
+            [PreserveSig] int GetDisplayName(SIGDN sigdnName, [MarshalAs(UnmanagedType.LPWStr)] out string ppszName);
+            [PreserveSig] int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+            [PreserveSig] int Compare(IShellItem psi, uint hint, out int piOrder);
+        }
+
+        enum SIGDN : uint { FILESYSPATH = 0x80058000 }
+
+        [Flags]
+        enum FOS : uint
+        {
+            PICKFOLDERS = 0x20,
+            FORCEFILESYSTEM = 0x40,
+            PATHMUSTEXIST = 0x800,
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+        static extern int SHCreateItemFromParsingName(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+            IntPtr pbc,
+            ref Guid riid,
+            out IShellItem ppv);
+
+        /// <summary>弹出 Windows 现代文件夹选择对话框，返回选中的路径；取消返回 null。</summary>
+        public static string PickFolder(IWin32Window owner, string initialPath, string title)
+        {
+            IFileOpenDialog dlg = null;
             try
             {
-                if (Environment.OSVersion.Version.Build >= 22000)
+                dlg = (IFileOpenDialog)new FileOpenDialogRCW();
+                dlg.SetOptions(FOS.PICKFOLDERS | FOS.FORCEFILESYSTEM | FOS.PATHMUSTEXIST);
+                dlg.SetTitle(title);
+                if (!string.IsNullOrEmpty(initialPath) && Directory.Exists(initialPath))
                 {
-                    int pref = 2;
-                    DwmSetWindowAttribute(Handle, 33, ref pref, 4);
-                }
-            }
-            catch { }
-        }
-
-        public DirPickerDialog(string initial)
-        {
-            initialPath = initial;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            Text = "浏览文件夹";
-            ClientSize = new Size(624, 526);
-            StartPosition = FormStartPosition.CenterParent;
-            MaximizeBox = false;
-            MinimizeBox = false;
-            ShowInTaskbar = false;
-            BackColor = Color.FromArgb(0xF3, 0xF5, 0xF9);
-            Font = new Font("微软雅黑", 9.5f);
-
-            var label = new Label
-            {
-                Text = "选择要安装 Aurora 极光音乐的文件夹位置:",
-                Location = new Point(20, 16),
-                AutoSize = true,
-                ForeColor = Color.FromArgb(0x1A, 0x20, 0x30),
-            };
-
-            tree = new TreeView
-            {
-                Location = new Point(20, 48),
-                Size = new Size(584, 386),
-                ImageList = icons,
-                ItemHeight = 24,
-                HideSelection = false,
-                FullRowSelect = true,
-                BorderStyle = BorderStyle.FixedSingle,
-                BackColor = Color.White,
-            };
-            tree.BeforeExpand += TreeBeforeExpand;
-            tree.AfterSelect += (s, e) =>
-            {
-                if (e.Node.Tag is string)
-                {
-                    SelectedPath = (string)e.Node.Tag;
-                    pathBox.Text = SelectedPath;
-                }
-            };
-
-            pathBox = new TextBox
-            {
-                Location = new Point(20, 442),
-                Size = new Size(584, 26),
-                ReadOnly = true,
-                BackColor = Color.White,
-                ForeColor = Color.FromArgb(0x5A, 0x64, 0x74),
-                BorderStyle = BorderStyle.FixedSingle,
-            };
-
-            var btnNew = new Installer.DarkButton { Text = "新建文件夹(M)", Location = new Point(20, 478) };
-            btnNew.Click += (s, e) => CreateNewFolder();
-
-            var btnOk = new Installer.GradientButton { Text = "确定", Size = new Size(110, 36), Location = new Point(374, 478) };
-            var btnCancel = new Installer.DarkButton { Text = "取消", Size = new Size(110, 36), Location = new Point(494, 478) };
-            btnOk.Click += (s, e) =>
-            {
-                if (!string.IsNullOrEmpty(SelectedPath)) DialogResult = DialogResult.OK;
-                else MessageBox.Show("请先选择一个文件夹");
-            };
-            btnCancel.Click += (s, e) => DialogResult = DialogResult.Cancel;
-
-            Controls.Add(label);
-            Controls.Add(tree);
-            Controls.Add(pathBox);
-            Controls.Add(btnNew);
-            Controls.Add(btnOk);
-            Controls.Add(btnCancel);
-
-            Load += (s, e) =>
-            {
-                AddSpecial("桌面", Environment.GetFolderPath(Environment.SpecialFolder.Desktop));
-                AddSpecial("文档", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
-                AddSpecial("下载", KnownFolder(DownloadsId));
-                AddSpecial("音乐", Environment.GetFolderPath(Environment.SpecialFolder.MyMusic));
-                AddSpecial("图片", Environment.GetFolderPath(Environment.SpecialFolder.MyPictures));
-                AddSpecial("视频", Environment.GetFolderPath(Environment.SpecialFolder.MyVideos));
-
-                var pcKey = IconKey(ComputerPath);
-                var pc = new TreeNode("此电脑") { ImageKey = pcKey, SelectedImageKey = pcKey, Tag = null };
-                pc.Nodes.Add(new TreeNode("…"));
-                tree.Nodes.Add(pc);
-
-                // 自动展开到初始路径所在驱动器
-                try
-                {
-                    if (!string.IsNullOrEmpty(initialPath))
+                    IShellItem psi;
+                    Guid iid = typeof(IShellItem).GUID;
+                    if (SHCreateItemFromParsingName(initialPath, IntPtr.Zero, ref iid, out psi) == 0)
                     {
-                        string root = Path.GetPathRoot(Path.GetFullPath(initialPath));
-                        foreach (TreeNode n in tree.Nodes)
-                        {
-                            if (n.Text != "此电脑") continue;
-                            n.Expand();
-                            foreach (TreeNode drive in n.Nodes)
-                            {
-                                string dp = drive.Tag as string;
-                                if (dp != null && root != null && dp.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    drive.Expand();
-                                    tree.SelectedNode = drive;
-                                    break;
-                                }
-                            }
-                            break;
-                        }
+                        dlg.SetDefaultFolder(psi);
+                        Marshal.ReleaseComObject(psi);
                     }
                 }
-                catch { }
-            };
-        }
-
-        /// <summary>取（或提取并缓存）路径对应的系统图标在 ImageList 中的键。</summary>
-        string IconKey(string shellPath)
-        {
-            string key;
-            if (iconKeys.TryGetValue(shellPath, out key)) return key;
-            key = "ic:" + iconKeys.Count;
-            Icon icon = GetShellIcon(shellPath);
-            icons.Images.Add(key, icon != null ? icon.ToBitmap() : FallbackFolderBitmap());
-            if (icon != null) icon.Dispose();
-            iconKeys[shellPath] = key;
-            return key;
-        }
-
-        static Icon GetShellIcon(string path)
-        {
-            try
-            {
-                var fi = new SHFILEINFO();
-                if (SHGetFileInfo(path, 0, ref fi, (uint)Marshal.SizeOf(typeof(SHFILEINFO)), SHGFI_ICON | SHGFI_SMALLICON) != IntPtr.Zero
-                    && fi.hIcon != IntPtr.Zero)
+                if (dlg.Show(owner.Handle) == 0)
                 {
-                    try { return (Icon)Icon.FromHandle(fi.hIcon).Clone(); }
-                    finally { DestroyIcon(fi.hIcon); }
+                    string path;
+                    if (dlg.GetFileName(out path) == 0 && !string.IsNullOrEmpty(path))
+                        return path;
                 }
             }
             catch { }
+            finally
+            {
+                if (dlg != null) Marshal.ReleaseComObject(dlg);
+            }
             return null;
-        }
-
-        static Bitmap FallbackFolderBitmap()
-        {
-            var bmp = new Bitmap(16, 16);
-            using (var g = Graphics.FromImage(bmp))
-            {
-                using (var b = new SolidBrush(Color.FromArgb(0xFF, 0xC9, 0x3C)))
-                {
-                    g.FillRectangle(b, 1, 4, 6, 3);
-                    g.FillRectangle(b, 1, 6, 14, 8);
-                }
-            }
-            return bmp;
-        }
-
-        void AddSpecial(string name, string path)
-        {
-            if (string.IsNullOrEmpty(path) || !Directory.Exists(path)) return;
-            string key = IconKey(path);
-            var n = new TreeNode(name) { ImageKey = key, SelectedImageKey = key, Tag = path };
-            n.Nodes.Add(new TreeNode("…"));
-            tree.Nodes.Add(n);
-        }
-
-        static string KnownFolder(Guid id)
-        {
-            try
-            {
-                IntPtr p;
-                if (SHGetKnownFolderPath(ref id, 0, IntPtr.Zero, out p) == 0)
-                {
-                    string s = Marshal.PtrToStringUni(p);
-                    Marshal.FreeCoTaskMem(p);
-                    return s;
-                }
-            }
-            catch { }
-            return null;
-        }
-
-        void TreeBeforeExpand(object sender, TreeViewCancelEventArgs e)
-        {
-            TreeNode n = e.Node;
-            if (n.Nodes.Count != 1 || n.Nodes[0].Text != "…") return; // 已展开过
-            n.Nodes.Clear();
-
-            if (n.Text == "此电脑" && n.Tag == null)
-            {
-                try
-                {
-                    foreach (DriveInfo d in DriveInfo.GetDrives())
-                    {
-                        if (d.DriveType != DriveType.Fixed || !d.IsReady) continue;
-                        string key = IconKey(d.Name);
-                        var dn = new TreeNode(d.Name) { ImageKey = key, SelectedImageKey = key, Tag = d.Name };
-                        dn.Nodes.Add(new TreeNode("…"));
-                        n.Nodes.Add(dn);
-                    }
-                }
-                catch { }
-                return;
-            }
-
-            string path = n.Tag as string;
-            if (path == null) return;
-            FillChildren(n, path);
-        }
-
-        void FillChildren(TreeNode n, string path)
-        {
-            try
-            {
-                foreach (string dir in Directory.GetDirectories(path))
-                {
-                    try
-                    {
-                        var attr = new DirectoryInfo(dir).Attributes;
-                        if ((attr & FileAttributes.Hidden) != 0 || (attr & FileAttributes.System) != 0) continue;
-                    }
-                    catch { continue; }
-                    string key = IconKey(dir);
-                    var child = new TreeNode(Path.GetFileName(dir)) { ImageKey = key, SelectedImageKey = key, Tag = dir };
-                    if (HasSubDirs(dir)) child.Nodes.Add(new TreeNode("…"));
-                    n.Nodes.Add(child);
-                }
-            }
-            catch { } // 无权限目录静默跳过
-        }
-
-        static bool HasSubDirs(string dir)
-        {
-            try
-            {
-                foreach (string d in Directory.GetDirectories(dir))
-                {
-                    try
-                    {
-                        var attr = new DirectoryInfo(d).Attributes;
-                        if ((attr & (FileAttributes.Hidden | FileAttributes.System)) == 0) return true;
-                    }
-                    catch { }
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        void CreateNewFolder()
-        {
-            TreeNode sel = tree.SelectedNode;
-            string parent = sel != null ? (sel.Tag as string) : null;
-            if (parent == null)
-            {
-                MessageBox.Show("请先选择一个磁盘或文件夹");
-                return;
-            }
-            try
-            {
-                string name = "新建文件夹";
-                string candidate = Path.Combine(parent, name);
-                int i = 2;
-                while (Directory.Exists(candidate)) { candidate = Path.Combine(parent, name + " (" + i + ")"); i++; }
-                Directory.CreateDirectory(candidate);
-
-                // 重列父节点子项并选中新文件夹
-                sel.Nodes.Clear();
-                FillChildren(sel, parent);
-                foreach (TreeNode c in sel.Nodes)
-                    if (string.Equals((string)c.Tag, candidate, StringComparison.OrdinalIgnoreCase)) { tree.SelectedNode = c; break; }
-                if (tree.SelectedNode == null) tree.SelectedNode = sel;
-                SelectedPath = candidate;
-                if (!sel.IsExpanded) sel.Expand();
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("创建文件夹失败：" + ex.Message);
-            }
         }
     }
 }

@@ -14,8 +14,22 @@ namespace Aurora
 {
     static class Assoc
     {
-        const string ProgId = "Aurora.Audio.mp3";
+        const string ProgId = "Aurora.Audio";
+        const string OldProgId = "Aurora.Audio.mp3";   // 旧版 ProgId，卸载时清理
         const string ExeName = "AuroraPlayer.exe";
+
+        // 支持的 9 种音频格式：扩展名 → MIME Content Type
+        static readonly string[,] Formats = {
+            { ".mp3",  "audio/mpeg" },
+            { ".m4a",  "audio/mp4" },
+            { ".flac", "audio/flac" },
+            { ".wav",  "audio/wav" },
+            { ".ogg",  "audio/ogg" },
+            { ".oga",  "audio/ogg" },
+            { ".aac",  "audio/aac" },
+            { ".opus", "audio/ogg" },
+            { ".wma",  "audio/x-ms-wma" },
+        };
 
         [DllImport("shell32.dll")]
         static extern void SHChangeNotify(int wEventId, int uFlags, IntPtr dwItem1, IntPtr dwItem2);
@@ -50,8 +64,11 @@ namespace Aurora
             return "\"" + path + "\"";
         }
 
-        /// <summary>注册文件关联（当前用户）。</summary>
-        public static void Register()
+        /// <summary>注册全部 9 种格式的文件关联（当前用户）。</summary>
+        public static void Register() { Register(null); }
+
+        /// <summary>注册文件关联（当前用户）。selectedExts 为 null 或空时注册全部 9 种。</summary>
+        public static void Register(string[] selectedExts)
         {
             try
             {
@@ -73,27 +90,33 @@ namespace Aurora
                     cm.SetValue(null, openValue);
                 Log("command set ok");
 
-                using (var ext = CreateClassesKey(".mp3"))
+                // 注册选中的音频格式扩展名关联（selectedExts 为 null/空时全部注册）
+                for (int i = 0; i < Formats.GetLength(0); i++)
                 {
-                    ext.SetValue(null, ProgId);
-                    ext.SetValue("Content Type", "audio/mpeg");
+                    string ext = Formats[i, 0];
+                    if (selectedExts != null && selectedExts.Length > 0 && Array.IndexOf(selectedExts, ext) < 0) continue;
+                    string mime = Formats[i, 1];
+                    using (var extKey = CreateClassesKey(ext))
+                    {
+                        extKey.SetValue(null, ProgId);
+                        extKey.SetValue("Content Type", mime);
+                    }
+                    using (var ow = CreateClassesKey(ext, "OpenWithProgids"))
+                        ow.SetValue(ProgId, "");
+                    // 移除旧的用户选择，让关联立即生效
+                    try
+                    {
+                        Registry.CurrentUser.DeleteSubKeyTree(string.Join(
+                            "\\", "Software", "Microsoft", "Windows", "CurrentVersion", "Explorer", "FileExts", ext, "UserChoice"),
+                            false);
+                    }
+                    catch (Exception ex) { Log("UserChoice " + ext + ": " + ex.Message); }
                 }
-                using (var ow = CreateClassesKey(".mp3", "OpenWithProgids"))
-                    ow.SetValue(ProgId, "");
                 using (var app = CreateClassesKey("Applications", ExeName, "shell", "open", "command"))
                     app.SetValue(null, openValue);
                 using (var cap = CreateClassesKey("Applications", ExeName))
                     cap.SetValue("FriendlyAppName", "Aurora 极光音乐");
                 Log("all keys set ok");
-
-                // 移除旧的用户选择，让关联立即生效
-                try
-                {
-                    Registry.CurrentUser.DeleteSubKeyTree(string.Join(
-                        "\\", "Software", "Microsoft", "Windows", "CurrentVersion", "Explorer", "FileExts", ".mp3", "UserChoice"),
-                        false);
-                }
-                catch (Exception ex) { Log("UserChoice: " + ex.Message); }
                 SHChangeNotify(SHCNE_ASSOCCHANGED, 0, IntPtr.Zero, IntPtr.Zero);
                 Log("register done");
             }
@@ -116,16 +139,82 @@ namespace Aurora
         {
             try
             {
-                using (var k = Registry.CurrentUser.OpenSubKey(string.Join("\\", "Software", "Classes", ".mp3"), true))
+                // 解除全部 9 种格式的扩展名关联
+                for (int i = 0; i < Formats.GetLength(0); i++)
                 {
-                    if (k != null && Convert.ToString(k.GetValue(null)) == ProgId)
-                        k.DeleteValue(null, false);
+                    string ext = Formats[i, 0];
+                    using (var k = Registry.CurrentUser.OpenSubKey(string.Join("\\", "Software", "Classes", ext), true))
+                    {
+                        if (k != null && Convert.ToString(k.GetValue(null)) == ProgId)
+                            k.DeleteValue(null, false);
+                    }
                 }
+                // 清理当前和旧版 ProgId
                 try { Registry.CurrentUser.DeleteSubKeyTree(string.Join("\\", "Software", "Classes", ProgId), false); } catch { }
+                try { Registry.CurrentUser.DeleteSubKeyTree(string.Join("\\", "Software", "Classes", OldProgId), false); } catch { }
                 try { Registry.CurrentUser.DeleteSubKeyTree(string.Join("\\", "Software", "Classes", "Applications", ExeName), false); } catch { }
                 SHChangeNotify(SHCNE_ASSOCCHANGED, 0, IntPtr.Zero, IntPtr.Zero);
             }
             catch { }
+        }
+
+        /// <summary>验证指定扩展名的关联是否指向本程序（HKCU 写入后可能被系统 UserChoice 覆盖）。</summary>
+        public static bool IsAssociated(string ext)
+        {
+            try
+            {
+                // 检查扩展名默认值是否为我们的 ProgId
+                using (var k = Registry.CurrentUser.OpenSubKey(
+                    string.Join("\\", "Software", "Classes", ext), false))
+                {
+                    if (k == null) return false;
+                    string def = Convert.ToString(k.GetValue(null));
+                    if (def != ProgId && def != OldProgId) return false;
+                }
+                // 检查 UserChoice 是否被其他程序覆盖（Windows 10+ 可能存在）
+                using (var uc = Registry.CurrentUser.OpenSubKey(
+                    string.Join("\\", "Software", "Microsoft", "Windows", "CurrentVersion",
+                        "Explorer", "FileExts", ext, "UserChoice"), false))
+                {
+                    if (uc != null)
+                    {
+                        string progId = Convert.ToString(uc.GetValue("ProgId"));
+                        if (!string.IsNullOrEmpty(progId) && progId != ProgId && progId != OldProgId)
+                            return false; // 被其他程序设为默认
+                    }
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// 打开 Windows 默认应用设置页面（ms-settings:defaultapps）。
+        /// 当 HKCU 写入关联不生效时（被系统 UserChoice 或其他程序覆盖），
+        /// 引导用户在设置页面手动将音频格式关联到 Aurora。
+        /// </summary>
+        public static bool OpenDefaultAppsSettings()
+        {
+            try
+            {
+                // ms-settings:defaultapps 是 Windows 10/11 内置 URI 协议
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "ms-settings:defaultapps",
+                    UseShellExecute = true
+                });
+                return true;
+            }
+            catch
+            {
+                // 回退：打开控制面板的默认程序页面
+                try
+                {
+                    System.Diagnostics.Process.Start("control.exe", "/name Microsoft.DefaultPrograms");
+                    return true;
+                }
+                catch { return false; }
+            }
         }
     }
 }

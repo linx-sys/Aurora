@@ -26,7 +26,8 @@ namespace Aurora
         {
             try { SetProcessDPIAware(); } catch { }
 
-            string selfDir = AppDomain.CurrentDomain.BaseDirectory;
+            string selfExe = Environment.ProcessPath ?? Assembly.GetExecutingAssembly().Location;
+            string selfDir = Path.GetDirectoryName(selfExe);
             bool secondPhase = args.Length > 0 && args[0] == "/clean";
 
             if (!secondPhase)
@@ -50,7 +51,7 @@ namespace Aurora
                 string tempCopy = Path.Combine(Path.GetTempPath(), "aurora_unins_" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".exe");
                 try
                 {
-                    File.Copy(Assembly.GetExecutingAssembly().Location, tempCopy, true);
+                    File.Copy(selfExe, tempCopy, true);
                     Process.Start(new ProcessStartInfo
                     {
                         FileName = tempCopy,
@@ -90,7 +91,7 @@ namespace Aurora
             // 延迟删除 TEMP 里的自己
             try
             {
-                string self = Assembly.GetExecutingAssembly().Location;
+                string self = Environment.ProcessPath ?? Assembly.GetExecutingAssembly().Location;
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = "cmd.exe",
@@ -106,13 +107,21 @@ namespace Aurora
         {
             try
             {
-                using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Classes\.mp3", true))
+                // 解除全部 9 种音频格式的关联
+                string[] exts = { ".mp3", ".m4a", ".flac", ".wav", ".ogg", ".oga", ".aac", ".opus", ".wma" };
+                foreach (string ext in exts)
                 {
-                    if (k != null && Convert.ToString(k.GetValue(null)) == "Aurora.Audio.mp3")
+                    using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Classes\" + ext, true))
                     {
-                        k.DeleteValue(null, false); // 删除默认值，回落系统默认
+                        if (k != null)
+                        {
+                            string val = Convert.ToString(k.GetValue(null));
+                            if (val == "Aurora.Audio" || val == "Aurora.Audio.mp3")
+                                k.DeleteValue(null, false);
+                        }
                     }
                 }
+                try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Aurora.Audio", false); } catch { }
                 try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Aurora.Audio.mp3", false); } catch { }
                 try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\Applications\AuroraPlayer.exe", false); } catch { }
                 try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\AuroraPlayer", false); } catch { }

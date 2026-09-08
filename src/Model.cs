@@ -70,6 +70,13 @@ namespace Aurora
             }
         }
 
+        /// <summary>封面变化后调用（如联网匹配下载了封面）：丢弃缓存并通知绑定刷新。</summary>
+        public void InvalidateThumb()
+        {
+            _thumb = null;
+            Raise("Thumb");
+        }
+
         public event PropertyChangedEventHandler PropertyChanged;
         void Raise(string prop)
         {
@@ -143,123 +150,44 @@ namespace Aurora
             };
             try { t.Bytes = new FileInfo(path).Length; } catch { }
 
+            // 统一标签读取服务（封装 MP3/FLAC/M4A/OGG/OPUS/WAV 解析 + 文件名推断 + 垃圾标签清除）
+            TrackMetadata meta = TagReaderService.Read(path);
+            t.Title = meta.Title;
+            t.Artist = meta.Artist;
+            t.Album = meta.Album;
+            if (meta.Cover != null) t.Cover = meta.Cover;
+            if (meta.Duration.HasValue) t.Duration = meta.Duration.Value;
             string ext = Path.GetExtension(path).ToLowerInvariant();
-            string tagTitle = null, tagArtist = null, tagAlbum = null;
-            if (ext == ".mp3")
-            {
-                Id3Info m = Id3.Read(path);
-                tagTitle = m.Title;
-                tagArtist = m.Artist;
-                tagAlbum = m.Album;
-                if (m.Cover != null) t.Cover = m.Cover;
-                TimeSpan? d = Mp3Duration.Read(path);
-                if (d.HasValue) t.Duration = d.Value;
-            }
-            else
-            {
-                // FLAC / M4A / OGG / OPUS / WAV 原生标签 + 封面 + 时长
-                AudioTags at = Tags.Read(path);
-                if (at != null)
-                {
-                    tagTitle = at.Title;
-                    tagArtist = at.Artist;
-                    tagAlbum = at.Album;
-                    if (at.Cover != null) t.Cover = at.Cover;
-                    if (at.Duration.HasValue) t.Duration = at.Duration.Value;
-                }
-            }
 
-            // 文件名解析："NN - Artist - Title" / "Artist - Title" / "Artist-Title" / "Title"
-            string baseName = Path.GetFileNameWithoutExtension(path).Trim();
-            string stripped = Regex.Replace(baseName, @"^\s*\d{1,3}\s*[-._)]\s*", "");
-            string fnameTitle = stripped, fnameArtist = null;
-            if (stripped.Contains(" - "))
-            {
-                string[] parts = stripped.Split(new[] { " - " }, StringSplitOptions.None);
-                if (parts.Length >= 2)
-                {
-                    fnameArtist = parts[0].Trim();
-                    fnameTitle = stripped.Substring(parts[0].Length + 3).Trim();
-                }
-            }
-            else
-            {
-                // 无空格写法回退：张韶涵-无度 / 吴昊–此去半生
-                foreach (string sep in new[] { "-", "–", "—" })
-                {
-                    int idx = stripped.IndexOf(sep);
-                    if (idx <= 0 || idx + sep.Length >= stripped.Length) continue;
-                    string a = stripped.Substring(0, idx).Trim();
-                    string b = stripped.Substring(idx + sep.Length).Trim();
-                    if (a.Length > 0 && b.Length > 0 && a.Length <= 24)
-                    {
-                        fnameArtist = a;
-                        fnameTitle = b;
-                        break;
-                    }
-                }
-            }
-
-            // 垃圾标签检测：下载器写入的 title/artist/album 同值（如 kuwo）或平台占位词。
-            // 此时文件名通常携带更真实的信息，弃用整个标签组。
-            bool junkTag = !string.IsNullOrWhiteSpace(tagTitle) &&
-                           (IsJunkTagText(tagTitle) ||
-                            (tagTitle == tagArtist && tagTitle == tagAlbum) ||
-                            (tagTitle == tagArtist && fnameArtist != null));
-            if (junkTag)
-            {
-                tagTitle = null;
-                tagArtist = null;
-                tagAlbum = null;
-            }
-
-            t.Title = !string.IsNullOrWhiteSpace(tagTitle) ? tagTitle : fnameTitle;
-            t.Artist = !string.IsNullOrWhiteSpace(tagArtist) ? tagArtist : (fnameArtist ?? "");
-            t.Album = tagAlbum ?? "";
-            if (string.IsNullOrEmpty(t.Title)) t.Title = Path.GetFileName(path);
-
-            string lrc;
-            if (lrcMap != null && lrcMap.TryGetValue(Path.GetFileNameWithoutExtension(path), out lrc))
-            {
-                try { t.LrcText = Id3.DecodeLoose(File.ReadAllBytes(lrc)); } catch { }
-            }
-            else
+            string lrc = NetMatch.FindLyricFile(path);
+            if (lrc == null && lrcMap != null)
+                lrcMap.TryGetValue(Path.GetFileNameWithoutExtension(path), out lrc);
+            if (lrc == null)
             {
                 string alt = path.Substring(0, path.Length - ext.Length) + ".mp3.lrc";
-                if (File.Exists(alt))
-                {
-                    try { t.LrcText = Id3.DecodeLoose(File.ReadAllBytes(alt)); } catch { }
-                }
+                if (File.Exists(alt)) lrc = alt;
+            }
+            if (lrc != null)
+            {
+                try { t.LrcText = Id3.DecodeLoose(File.ReadAllBytes(lrc)); } catch { }
             }
 
             if (t.Artist == null) t.Artist = "";
             if (t.Album == null) t.Album = "";
-            return t;
-        }
 
-        /// <summary>下载工具常写入的无意义占位标签词。</summary>
-        static bool IsJunkTagText(string s)
-        {
-            switch (s.Trim().ToLowerInvariant())
+            // 外部封面兜底：缓存目录优先，同目录 .jpg 向后兼容
+            if (t.Cover == null || t.Cover.Length == 0)
             {
-                case "kuwo":
-                case "kwmusic":
-                case "kuwo.cn":
-                case "qqmusic":
-                case "netease":
-                case "cloudmusic":
-                case "music":
-                case "audio":
-                case "temp":
-                case "track":
-                case "unknown":
-                case "未知":
-                case "未知歌手":
-                case "未知艺术家":
-                    return true;
-                default:
-                    return false;
+                string cached = NetMatch.GetCoverCachePath(path);
+                if (File.Exists(cached))
+                    try { t.Cover = File.ReadAllBytes(cached); } catch { }
             }
+            if (t.Cover == null || t.Cover.Length == 0)
+            {
+                string jpg = Path.ChangeExtension(path, ".jpg");
+                try { if (File.Exists(jpg)) t.Cover = File.ReadAllBytes(jpg); } catch { }
+            }
+            return t;
         }
     }
 
@@ -337,6 +265,55 @@ namespace Aurora
         }
     }
 
+    /// <summary>AAC 裸流（ADTS）时长估算：解析首个 ADTS 帧头得到采样率与帧长，
+    /// 按 CBR 思路（同 Mp3Duration）以首帧均长估算总时长；每帧固定 1024 样本。</summary>
+    public static class AacDuration
+    {
+        static readonly int[] SampleRates = { 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350 };
+
+        public static TimeSpan? Read(string path)
+        {
+            try
+            {
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    long pos = 0;
+                    var head = new byte[10];
+                    if (fs.Read(head, 0, 10) < 10) return null;
+                    if (head[0] == 0x49 && head[1] == 0x44 && head[2] == 0x33)
+                    {
+                        // 允许 ADTS 前置 ID3v2 标签
+                        int size = ((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f);
+                        pos = 10L + size + ((head[5] & 0x10) != 0 ? 10 : 0);
+                    }
+
+                    fs.Position = pos;
+                    var buf = new byte[65536];
+                    int n = fs.Read(buf, 0, buf.Length);
+
+                    // ADTS 同步字：byte0=0xFF；byte1 高 4 位=1111 且 layer 位（bit2:1）=00
+                    for (int i = 0; i < n - 7; i++)
+                    {
+                        if (buf[i] != 0xFF || (buf[i + 1] & 0xF6) != 0xF0) continue;
+                        int srIdx = (buf[i + 2] >> 2) & 0xF;
+                        if (srIdx >= SampleRates.Length) continue;
+                        int sampleRate = SampleRates[srIdx];
+                        if (sampleRate == 0) continue;
+                        int headerLen = (buf[i + 1] & 1) != 0 ? 7 : 9;   // protection_absent → 有无 CRC
+                        int frameLen = ((buf[i + 3] & 0x03) << 11) | (buf[i + 4] << 3) | ((buf[i + 5] >> 5) & 0x07);
+                        if (frameLen <= headerLen) continue;
+
+                        long audioBytes = Math.Max(0, fs.Length - pos);
+                        double frames = audioBytes / (double)frameLen;   // CBR 帧均长估算
+                        return TimeSpan.FromSeconds(frames * 1024 / sampleRate);
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+    }
+
     /// <summary>简易 INI 设置（%APPDATA%\AuroraPlayer\settings.ini）。</summary>
     public static class Settings
     {
@@ -378,7 +355,16 @@ namespace Aurora
                 foreach (var kv in _kv) sb.Append(kv.Key).Append('=').Append(kv.Value).Append("\r\n");
                 File.WriteAllText(File_, sb.ToString());
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // 写盘失败不能让播放器崩掉（内存中的 _kv 已更新），
+                // 但也不能完全静默——至少留下痕迹便于诊断"设置不生效"类问题
+                try
+                {
+                    MainViewModel.Dbg("Settings.Set FAIL [" + key + "=" + val + "]: " + ex.Message);
+                }
+                catch { }
+            }
         }
     }
 }

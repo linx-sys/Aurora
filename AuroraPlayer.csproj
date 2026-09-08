@@ -1,0 +1,71 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>AuroraPlayer</AssemblyName>
+    <RootNamespace>Aurora</RootNamespace>
+    <StartupObject>Aurora.App</StartupObject>
+    <ApplicationIcon>assets\app.ico</ApplicationIcon>
+    <OutputPath>build\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ui.xaml 编译为 BAML（P3 完成：编译期校验 + 启动提速） -->
+    <Page Include="src\ui.xaml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="src\App.cs" />
+    <Compile Include="src\Assoc.cs" />
+    <Compile Include="src\CoverArt.cs" />
+    <Compile Include="src\Id3.cs" />
+    <Compile Include="src\Lrc.cs" />
+    <Compile Include="src\MainWindow.cs" />
+    <Compile Include="src\Model.cs" />
+    <Compile Include="src\NetMatch.cs" />
+    <Compile Include="src\ILyricsProvider.cs" />
+    <Compile Include="src\PlayerEngine.cs" />
+    <Compile Include="src\TagReaderService.cs" />
+    <Compile Include="src\Tags.cs" />
+    <Compile Include="src\ViewModelBase.cs" />
+    <Compile Include="src\RelayCommand.cs" />
+    <Compile Include="src\MainViewModel.cs" />
+    <Compile Include="src\VorbisWaveReader.cs" />
+    <Compile Include="src\OpusWaveReader.cs" />
+    <Compile Include="src\PlaybackController.cs" />
+    <Compile Include="src\PlaylistManager.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- NAudio 2.2.1 (MIT) - 音频输出 + 真实频谱样本抓取；元包自动携带 Core/WinMM/Wasapi 子包 -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <!-- NVorbis 0.10.4 (MIT) - OGG 纯托管解码 -->
+    <PackageReference Include="NVorbis" Version="0.10.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Concentus 1.1.6 + Concentus.Oggfile 1.0.4 (MIT) - OPUS 纯托管解码。
+         注意：作者未发布到 NuGet（api.nuget.org 上无此包），只能保留本地 DLL 引用；
+         若日后上架 NuGet 可改为 PackageReference。版本与 lib/ 下 DLL 一致。 -->
+    <Reference Include="Concentus">
+      <HintPath>lib\Concentus.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Concentus.Oggfile">
+      <HintPath>lib\Concentus.Oggfile.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

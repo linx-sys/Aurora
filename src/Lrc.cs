@@ -76,9 +76,10 @@ namespace Aurora
 
             if (offset != 0)
             {
+                // 正 offset 提前、负 offset 延后；钳制到 0 保证时间轴单调不回退
                 double off = offset / 1000.0;
                 foreach (LrcLine l in doc.Lines)
-                    if (l.Time + off > 0) l.Time += off;
+                    l.Time = Math.Max(0, l.Time + off);
             }
             return doc;
         }

@@ -1,7 +1,25 @@
 # 构建产物
 build/
-AuroraPlayer-Setup.exe
+obj/
+bin/
+win-x64/
+.pkg/
+
+# 编译输出的可执行文件与副产物
 *.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+*.dll.config
+
+# IDE / 编辑器
+.vs/
+.vscode/
+*.user
+
+# 系统垃圾文件
+Thumbs.db
+Desktop.ini
 
 # 本地工具数据
 .mimosa/
@@ -10,7 +28,7 @@ AuroraPlayer-Setup.exe
 # 受版权保护的测试歌曲（不上传公开仓库）
 testmusic/陈奕迅 - 富士山下.mp3
 testmusic/张韶涵-无度.mp3
-
-# 系统垃圾文件
-Thumbs.db
-Desktop.ini
+testmusic/陈奕迅 - 富士山下.lrc
+testmusic/陈奕迅 - 富士山下.jpg
+testmusic/张韶涵-无度.lrc
+testmusic/张韶涵-无度.jpg

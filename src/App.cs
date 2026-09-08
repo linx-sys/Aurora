@@ -17,16 +17,9 @@ namespace Aurora
         [STAThread]
         static void Main(string[] args)
         {
-            // 关联管理：安装器留下的 .associate 标记 → 首次启动时注册文件关联
-            try
-            {
-                string flag = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".associate");
-                if (File.Exists(flag))
-                {
-                    Assoc.Register();
-                    File.Delete(flag);
-                }
-            }
+            // .NET Core/10 默认不含代码页编码（GBK 等），必须注册 CodePagesEncodingProvider，
+            // 否则老歌 GBK 标签/歌词的解码回退静默失效（Id3.MakeGbk 返回 null → 乱码）
+            try { Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance); }
             catch { }
 
             // 关联管理：AuroraPlayer.exe /associate 或 /unassociate（手动调用）
@@ -59,8 +52,40 @@ namespace Aurora
                 Environment.Exit(0); // 转发完成后立即退出，避免进程残留
             }
 
+            // 关联管理：安装器留下的 .associate 标记 → 仅由首实例处理（避免双实例竞争删除）
+            try
+            {
+                string flag = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".associate");
+                if (File.Exists(flag))
+                {
+                    string content = File.ReadAllText(flag).Trim();
+                    if (content == "1" || content.Length == 0)
+                        Assoc.Register();
+                    else
+                    {
+                        // 逗号分隔的扩展名列表，如 ".mp3,.flac,.m4a"
+                        string[] exts = content.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+                        for (int i = 0; i < exts.Length; i++) exts[i] = exts[i].Trim().ToLowerInvariant();
+                        Assoc.Register(exts);
+                    }
+                    File.Delete(flag);
+                }
+            }
+            catch { }
+
             var app = new Application();
             app.ShutdownMode = ShutdownMode.OnMainWindowClose;
+
+            // 全局异常钩子：Dispatcher（UI 定时器/事件）与后台线程的未处理异常都会闪退
+            // 但不会经过 Main 的 try-catch，这里统一落盘以便定位
+            app.DispatcherUnhandledException += (s, e) =>
+            {
+                LogCrash("DispatcherUnhandledException", e.Exception);
+                e.Handled = true;   // 尽量不闪退；若状态已损坏由用户手动重启
+            };
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+                LogCrash("AppDomain.UnhandledException (terminating=" + e.IsTerminating + ")", e.ExceptionObject as Exception);
+
             try
             {
                 var win = new MainWindow(fileArg);
@@ -68,15 +93,20 @@ namespace Aurora
             }
             catch (Exception ex)
             {
-                try
-                {
-                    File.WriteAllText(
-                        Path.Combine(Path.GetTempPath(), "aurora_crash.log"),
-                        DateTime.Now + "\r\n" + ex);
-                }
-                catch { }
+                LogCrash("Main", ex);
                 throw;
             }
+        }
+
+        static void LogCrash(string source, Exception ex)
+        {
+            try
+            {
+                File.AppendAllText(
+                    Path.Combine(Path.GetTempPath(), "aurora_crash.log"),
+                    "\r\n==== " + DateTime.Now + "  [" + source + "] ====\r\n" + ex);
+            }
+            catch { }
         }
 
         static void ForwardToRunning(string path)

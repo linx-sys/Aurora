@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>AuroraPlayer-Setup</AssemblyName>
+    <RootNamespace>Aurora</RootNamespace>
+    <OutputPath>.\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ApplicationIcon>assets\app.ico</ApplicationIcon>
+    <!-- 单文件发布：将 dll 和内嵌资源打包进单个 exe（框架依赖，需 .NET 10 运行时） -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\Installer.cs" />
+  </ItemGroup>
+
+  <!-- 嵌入主程序 + 卸载器 + 运行时配置 + 第三方 DLL + 图标 -->
+  <ItemGroup>
+    <EmbeddedResource Include="build\AuroraPlayer.exe" LogicalName="Aurora.AuroraPlayer.exe" />
+    <EmbeddedResource Include="build\AuroraPlayer.dll" LogicalName="Aurora.AuroraPlayer.dll" />
+    <EmbeddedResource Include="build\AuroraPlayer.runtimeconfig.json" LogicalName="Aurora.AuroraPlayer.runtimeconfig.json" />
+    <EmbeddedResource Include="build\AuroraPlayer.deps.json" LogicalName="Aurora.AuroraPlayer.deps.json" />
+    <EmbeddedResource Include="build\unins.exe" LogicalName="Aurora.unins.exe" />
+    <EmbeddedResource Include="build\unins.runtimeconfig.json" LogicalName="Aurora.unins.runtimeconfig.json" />
+    <EmbeddedResource Include="build\unins.deps.json" LogicalName="Aurora.unins.deps.json" />
+    <EmbeddedResource Include="build\NVorbis.dll" LogicalName="Aurora.NVorbis.dll" />
+    <EmbeddedResource Include="build\Concentus.dll" LogicalName="Aurora.Concentus.dll" />
+    <EmbeddedResource Include="build\Concentus.Oggfile.dll" LogicalName="Aurora.Concentus.Oggfile.dll" />
+    <EmbeddedResource Include="build\NAudio.dll" LogicalName="Aurora.NAudio.dll" />
+    <EmbeddedResource Include="build\NAudio.Core.dll" LogicalName="Aurora.NAudio.Core.dll" />
+    <EmbeddedResource Include="build\NAudio.WinMM.dll" LogicalName="Aurora.NAudio.WinMM.dll" />
+    <EmbeddedResource Include="build\NAudio.Wasapi.dll" LogicalName="Aurora.NAudio.Wasapi.dll" />
+    <EmbeddedResource Include="assets\icon256.png" LogicalName="Aurora.icon.png" />
+  </ItemGroup>
+
+</Project>

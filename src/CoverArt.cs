@@ -103,7 +103,7 @@ namespace Aurora
                 string ch = FirstGrapheme(title).ToUpperInvariant();
                 var face = new Typeface(new FontFamily("微软雅黑, Segoe UI"), FontStyles.Normal, FontWeights.Bold, FontStretches.Normal);
                 var ft = new FormattedText(ch, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
-                    face, size * 0.44, new SolidColorBrush(Color.FromArgb(110, 255, 255, 255)));
+                    face, size * 0.44, new SolidColorBrush(Color.FromArgb(110, 255, 255, 255)), 1.0);
                 dc.DrawText(ft, new Point((size - ft.Width) / 2, (size - ft.Height) / 2 - size * 0.06));
 
                 if (withText && size >= 256)
@@ -111,10 +111,10 @@ namespace Aurora
                     // 底部：歌名 + 歌手（加深色渐变条保证可读）
                     double pad = size * 0.085;
                     var f1 = new FormattedText(Trim(title, 14), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
-                        face, size * 0.062, Brushes.White);
+                        face, size * 0.062, Brushes.White, 1.0);
                     var f2face = new Typeface(new FontFamily("微软雅黑, Segoe UI"), FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
                     var f2 = new FormattedText(Trim(artist, 20), CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
-                        f2face, size * 0.042, new SolidColorBrush(Color.FromArgb(210, 255, 255, 255)));
+                        f2face, size * 0.042, new SolidColorBrush(Color.FromArgb(210, 255, 255, 255)), 1.0);
                     double y = size - size * 0.155;
                     var shade = new LinearGradientBrush();
                     shade.StartPoint = new Point(0, 0);
