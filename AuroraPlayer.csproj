@@ -27,17 +27,21 @@
 
   <ItemGroup>
     <Compile Include="src\App.cs" />
+    <Compile Include="src\AnimatedStackPanel.cs" />
     <Compile Include="src\Assoc.cs" />
     <Compile Include="src\CoverArt.cs" />
     <Compile Include="src\Id3.cs" />
     <Compile Include="src\Lrc.cs" />
+    <Compile Include="src\LyricsViewController.cs" />
     <Compile Include="src\MainWindow.cs" />
     <Compile Include="src\Model.cs" />
     <Compile Include="src\NetMatch.cs" />
+    <Compile Include="src\NetMatchSettingsDialog.cs" />
     <Compile Include="src\ILyricsProvider.cs" />
     <Compile Include="src\PlayerEngine.cs" />
     <Compile Include="src\TagReaderService.cs" />
     <Compile Include="src\Tags.cs" />
+    <Compile Include="src\ThemeController.cs" />
     <Compile Include="src\ViewModelBase.cs" />
     <Compile Include="src\RelayCommand.cs" />
     <Compile Include="src\MainViewModel.cs" />
@@ -45,6 +49,10 @@
     <Compile Include="src\OpusWaveReader.cs" />
     <Compile Include="src\PlaybackController.cs" />
     <Compile Include="src\PlaylistManager.cs" />
+    <Compile Include="src\PlaylistViewController.cs" />
+    <Compile Include="src\LibraryImportController.cs" />
+    <Compile Include="src\SingleInstanceServer.cs" />
+    <Compile Include="src\WindowChromeController.cs" />
   </ItemGroup>
 
   <ItemGroup>
