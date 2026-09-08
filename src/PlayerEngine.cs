@@ -28,6 +28,13 @@ namespace Aurora
         public int SampleRate;
     }
 
+    /// <summary>播放自然结束事件参数（携带播放会话 ID，供订阅方过滤过期事件）。</summary>
+    public class PlaybackEndedEventArgs : EventArgs
+    {
+        public long SessionId;
+        public string Path;
+    }
+
     /// <summary>
     /// 样本抓取包装器：在播放链中插入，复制 PCM 数据给频谱模块。
     /// 实现 ISampleProvider，不干扰播放线程。
@@ -90,9 +97,19 @@ namespace Aurora
         private long _playStartTicks;          // 本次 Play() 的 UTC 计时（快速停止防护用）
         private int _fastStopRetries;          // 快速停止重试计数（防死循环）
 
+        // ===== 播放会话（PlaybackSession）=====
+        // 每次 Load() 递增。所有异步事件（PlaybackStopped/PlaybackEnded）在触发源处
+        // 捕获所属会话 ID；订阅方/引擎比对 ID 不一致即判定为过期事件直接丢弃，
+        // 替代"比较 CurrentPath 字符串"的临时方案，也不依赖任何时间阈值。
+        private long _sessionId;
+        private EventHandler<StoppedEventArgs> _stoppedHandler;   // 保存闭包引用以便退订
+
+        /// <summary>当前播放会话 ID（每次 Load 递增；切歌竞态过滤的唯一依据）。</summary>
+        public long SessionId { get { return _sessionId; } }
+
         public event EventHandler<PlaybackStateChangedEventArgs> StateChanged;
         public event EventHandler<SpectrumDataEventArgs> SpectrumDataReady;
-        public event EventHandler PlaybackEnded;
+        public event EventHandler<PlaybackEndedEventArgs> PlaybackEnded;
 
         public PlaybackState State { get; private set; }
 
@@ -139,6 +156,10 @@ namespace Aurora
         {
             try
             {
+                // 会话递增必须最先做：让旧会话在 Stop/Dispose 期间及之后产生的任何
+                // 异步事件（PlaybackStopped 等）都因 ID 不匹配而被丢弃
+                _sessionId++;
+                long sessionId = _sessionId;
                 Stop();
                 DisposeWaveOut();
 
@@ -169,7 +190,10 @@ namespace Aurora
                 _waveOut.DesiredLatency = 100;
                 _waveOut.NumberOfBuffers = 3;
                 _waveOut.Volume = _desiredVolume;   // 恢复用户音量（新 WaveOut 默认 100%）
-                _waveOut.PlaybackStopped += OnPlaybackStopped;
+                // 闭包捕获本会话 ID：该设备实例后续触发的 PlaybackStopped 都归属此会话，
+                // 若回调时 _sessionId 已变化（期间又 Load 了新歌），事件按过期丢弃
+                _stoppedHandler = (s, e) => OnPlaybackStopped(s, e, sessionId);
+                _waveOut.PlaybackStopped += _stoppedHandler;
                 _waveOut.Init(_capture);
 
                 State = PlaybackState.Stopped;
@@ -255,13 +279,19 @@ namespace Aurora
             }
         }
 
-        private void OnPlaybackStopped(object sender, StoppedEventArgs e)
+        private void OnPlaybackStopped(object sender, StoppedEventArgs e, long session)
         {
+            // ===== 会话过滤（PlaybackSession）=====
+            // 该 stopped 事件来自 session 号对应的设备实例；若期间已 Load 新歌
+            //（_sessionId 变化），这是旧会话的过期事件，直接丢弃——无论其表现
+            // 像"自然播完"还是"设备中断"，都不允许触发切歌。
+            if (session != _sessionId || _disposed) return;
+
             // 自然结束：_isPlaying 仍为 true（主动 Stop()/Pause() 会先置 false 再动作，
             // 因此走到这里的 stopped 一定是播到末尾或设备中断，均按结束处理。
             // 不能用 CurrentTime >= TotalTime 判定——MF 解码的 MP3 常停在比
             // TotalTime 略小的位置（帧填充样本），精确比较会漏判导致不切歌。
-            Aurora.MainViewModel.Dbg("OnPlaybackStopped: path=" + _currentPath + " isPlaying=" + _isPlaying);
+            Aurora.MainViewModel.Dbg("OnPlaybackStopped: session=" + session + " path=" + _currentPath + " isPlaying=" + _isPlaying);
             if (_isPlaying)
             {
                 // 快速停止防护：点击切歌时旧 WaveOut 正在活跃播放，Stop()+Dispose() 后
@@ -293,7 +323,7 @@ namespace Aurora
                 _isPlaying = false;
                 State = PlaybackState.Stopped;
                 var handler = PlaybackEnded;
-                if (handler != null) handler(this, EventArgs.Empty);
+                if (handler != null) handler(this, new PlaybackEndedEventArgs { SessionId = session, Path = _currentPath });
                 RaiseStateChanged();
             }
         }
@@ -316,7 +346,8 @@ namespace Aurora
         {
             if (_waveOut != null)
             {
-                _waveOut.PlaybackStopped -= OnPlaybackStopped;
+                if (_stoppedHandler != null) _waveOut.PlaybackStopped -= _stoppedHandler;
+                _stoppedHandler = null;
                 _waveOut.Dispose();
                 _waveOut = null;
             }

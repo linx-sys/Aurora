@@ -357,20 +357,21 @@ namespace Aurora
             });
         }
 
-        private void OnPlaybackEnded(object sender, EventArgs e)
+        private void OnPlaybackEnded(object sender, PlaybackEndedEventArgs e)
         {
-            // 后台线程立即快照"结束曲目的路径"。PlaybackEnded 经 BeginInvoke 派发到 UI
-            // 线程有延迟（天然切歌→回调排队），若期间用户已点击切歌（Player.CurrentPath
-            // 已变为新文件），这是一次过期的自动切歌——必须丢弃，否则会覆盖用户的选择
+            // 后台线程立即快照"结束播放的会话 ID"。PlaybackEnded 经 BeginInvoke 派发到 UI
+            // 线程有延迟（天然切歌→回调排队），若期间用户已点击切歌（引擎已 Load 新歌，
+            // SessionId 递增），这是一次过期的自动切歌——必须丢弃，否则会覆盖用户的选择
             // （实测：连续点击列表切歌会被迟到的自动切歌抢走，播回随机曲目）。
-            string endedPath = _player.CurrentPath;
-            Dbg("PlaybackEnded bg: endedPath=" + endedPath);
+            // 引擎侧已在 OnPlaybackStopped 做过一轮会话过滤，这里是派发延迟的第二道防线。
+            long endedSession = e.SessionId;
+            Dbg("PlaybackEnded bg: session=" + endedSession + " path=" + e.Path);
             RunOnUiThread(() =>
             {
-                bool stale = !string.Equals(_player.CurrentPath, endedPath, StringComparison.OrdinalIgnoreCase);
-                Dbg("PlaybackEnded ui: endedPath=" + endedPath + " currentPath=" + _player.CurrentPath + " stale=" + stale);
+                bool stale = _player.SessionId != endedSession;
+                Dbg("PlaybackEnded ui: endedSession=" + endedSession + " currentSession=" + _player.SessionId + " stale=" + stale);
                 if (stale)
-                    return;   // 引擎已加载另一首：本次自动切歌过期，忽略
+                    return;   // 引擎已加载另一首（新会话）：本次自动切歌过期，忽略
                 NextTrack(false);
             });
         }
