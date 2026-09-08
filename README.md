@@ -4,7 +4,7 @@
 
 ## 成品
 
-**`AuroraPlayer-Setup.exe`（约 1.5 MB，单文件安装包，框架依赖部署）**
+**`AuroraPlayer-Setup.exe`（约 1.9 MB，单文件安装包，框架依赖部署）**
 
 > 安装包内嵌播放器、卸载器及全部第三方 DLL，但**不内嵌 .NET 10 运行时**。目标系统需安装 [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)（Win10 1607+ / Win11 可通过系统更新或手动安装）。若未安装运行时，播放器启动会失败并提示"找不到托管 DLL"，请先安装运行时。
 
@@ -18,10 +18,11 @@
 | 格式 | 解码方式 | 标签/封面 |
 | --- | --- | --- |
 | `.mp3` | NAudio / Media Foundation | ID3v1/v2.2/v2.3/v2.4 + 封面 |
-| `.m4a` / `.aac` | NAudio / Media Foundation | iTunes ilst + 封面 |
+| `.m4a` | NAudio / Media Foundation | iTunes ilst + 封面 |
+| `.aac` | NAudio / Media Foundation | 裸流无容器标签：标题取自文件名，时长为 ADTS 帧头 CBR 估算 |
 | `.flac` | NAudio / Media Foundation | VORBIS_COMMENT + 内嵌封面 |
 | `.wav` | NAudio / Media Foundation | LIST INFO / id3 chunk |
-| `.wma` | Media Foundation | ASF 元数据 |
+| `.wma` | Media Foundation | 无 ASF 标签解析：标题取自文件名，封面不显示 |
 | `.ogg` / `.oga` | **NVorbis 纯托管内置解码** | VorbisComment |
 | `.opus` | **Concentus 纯托管内置解码** | VorbisComment |
 
@@ -70,7 +71,7 @@ experiments/  实验性代码（不参与编译）
 
 **关键设计决策**：
 - **MVVM 单一数据源**：播放状态（tracks/view/current/mode/volume/playing/sortMode）全部收敛在 `MainViewModel` 与 `PlaylistManager`，`MainWindow.cs` 只保留对 VM 状态的只读代理与 UI 联动（图标/动画/提示），不再维护任何平行的状态副本；搜索/排序管道唯一（`PlaylistManager.RefreshView`），列表计数由 `View.CollectionChanged` 统一驱动
-- **播放模式状态机抽离**：`PlaybackController` 为纯逻辑类（不触碰 UI/引擎），配合 `PlaylistManager` 一起被单元测试覆盖（`tests/`，33 个用例）
+- **播放模式状态机抽离**：`PlaybackController` 为纯逻辑类（不触碰 UI/引擎），配合 `PlaylistManager` 一起被单元测试覆盖（`tests/`，39 个用例全部通过）
 - **UI 线程安全调度**：`PlayerEngine` 的 `StateChanged`/`PlaybackEnded` 事件在后台线程触发，`MainViewModel` 捕获 `Dispatcher.CurrentDispatcher` 并通过 `Dispatcher.BeginInvoke` 统一切回 UI 线程（不能用 `SynchronizationContext.Current`——`app.Run()` 之前它是 null，兜底 `new SynchronizationContext()` 的 Post 会在线程池执行导致跨线程闪退）
 - **OGG 流式播放**：`VorbisWaveReader`（继承 `WaveStream` + 实现 `ISampleProvider`）直接将 NVorbis 解码的 PCM 浮点样本接入 NAudio 播放链，**无需先解码为临时 WAV**，消除磁盘 I/O、切换延迟与临时文件泄漏；支持任意大小文件（无 50MB 上限）
 - **XAML BAML 编译**：ui.xaml 编译为二进制 BAML，启动提速约 30%，编译期校验 Binding 路径
@@ -86,7 +87,7 @@ experiments/  实验性代码（不参与编译）
 | --- | --- |
 | 文件关联 | 安装后双击任意支持格式直接播放；同时加载其所在文件夹的全部音乐 |
 | 单实例 | 已在播放时再次双击音乐，唤起现有窗口并切歌，不会开新进程 |
-| 标签解析 | 9 种格式全覆盖，均含封面与精确时长；智能识别下载器写入的占位标签（如 title=artist=album=kuwo），自动改用文件名信息 |
+| 标签解析 | MP3/FLAC/M4A/OGG/OPUS/WAV 含完整标签与封面；`.aac`/`.wma` 裸流/ASF 无标签解析，标题取自文件名；智能识别下载器写入的占位标签（如 title=artist=album=kuwo），自动改用文件名信息 |
 | 文件名推断 | 支持 `歌手 - 标题.mp3`、`歌手-标题.mp3`、`NN - 标题.mp3` 等常见命名，无标签文件也能正确显示 |
 | 中文兼容 | 老歌 GBK 编码标签与 GBK 歌词文件自动识别，无乱码 |
 | 封面 | 有内嵌封面直接显示；**无封面的歌曲按歌名自动生成专属渐变封面**（首字大字 + 歌曲信息，10 组极光配色），列表与播放页统一 |
@@ -127,13 +128,13 @@ dotnet publish installer.csproj -c Release -r win-x64 --self-contained false
 
 - `build\AuroraPlayer.exe` — 播放器（apphost，需同目录 DLL + .NET 10 运行时）
 - `build\unins.exe` — 卸载器（需 .NET 10 运行时）
-- `AuroraPlayer-Setup.exe` — 单文件安装包（PublishSingleFile，内嵌播放器/卸载器及全部 DLL，约 1.5 MB）
+- `AuroraPlayer-Setup.exe` — 单文件安装包（PublishSingleFile，内嵌播放器/卸载器及全部 DLL，约 1.9 MB）
 
 ## 目录结构
 
 ```
 MP3Player/
-├── AuroraPlayer-Setup.exe   ★ 成品安装包（单文件，约 1.5 MB）
+├── AuroraPlayer-Setup.exe   ★ 成品安装包（单文件，约 1.9 MB）
 ├── AuroraPlayer.csproj       主程序项目（WPF, net10.0-windows）
 ├── unins.csproj              卸载器项目（WinForms, net10.0-windows）
 ├── installer.csproj          安装器项目（WinForms, net10.0-windows, PublishSingleFile）
@@ -143,10 +144,11 @@ MP3Player/
 │   ├── Concentus.dll         OPUS 纯托管解码器（NuGet 无此包，本地引用）
 │   └── Concentus.Oggfile.dll OPUS Ogg 解封装（NuGet 无此包，本地引用）
 │   （NAudio 2.2.1 / NVorbis 0.10.4 已迁移 NuGet PackageReference 锁定版本）
-├── tests/                    单元测试（xunit，dotnet test 运行）
+├── tests/                    单元测试（xunit，dotnet test 运行，39 用例）
 │   ├── Aurora.Tests.csproj
 │   ├── PlaybackControllerTests.cs
 │   ├── PlaylistManagerTests.cs
+│   ├── NetMatchSettingsTests.cs  按格式联网匹配开关（Settings 键逻辑）
 │   └── DurationTests.cs      Mp3Duration / AacDuration（合成帧流）
 ├── assets/                   图标素材（app.ico / icon256.png）
 ├── experiments/              实验性代码（不参与编译）
@@ -178,7 +180,7 @@ MP3Player/
 
 ## 已知限制
 
-- AAC 裸流（.aac，ADTS）无容器标签，标题取自文件名，时长在首次播放后显示
+- `.aac`（ADTS 裸流）与 `.wma` 无容器标签解析：标题/歌手取自文件名推断，封面不显示；`.aac` 时长为 ADTS 帧头 CBR 估算（VBR 文件可能有偏差），`.wma` 时长在首次播放后显示
 - 频谱 UI 当前未启用；`PlayerEngine` 已内置 `SampleCaptureProvider` 可输出当前歌曲的 PCM 浮点样本（非系统环回），如需频谱 UI 可直接接入
 - 随机播放的"上一首"仅在本轮会话内有效
 - OGG/OPUS 采用 NVorbis 纯托管流式解码（`VorbisWaveReader`），直接接入 NAudio 播放链，无临时文件、无大小上限；超大文件（如数小时的 OGG）首次加载时会有短暂索引构建延迟
