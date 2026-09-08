@@ -12,7 +12,7 @@ using System.Windows.Media.Imaging;
 
 namespace Aurora
 {
-    static class CoverArt
+    public static class CoverArt
     {
         static readonly Color[][] Palettes = new Color[][]
         {
