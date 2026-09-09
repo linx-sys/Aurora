@@ -19,6 +19,9 @@ env:
 jobs:
   build-test:
     runs-on: windows-latest
+    # 创建 Release 需要 GITHUB_TOKEN 具备 contents:write（默认只读会导致 403）
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
