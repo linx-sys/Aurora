@@ -117,6 +117,17 @@ namespace Aurora
             wasapiCb.Unchecked += (s, e) => Settings.Set("wasapi_exclusive", "0");
             root.Children.Add(wasapiCb);
 
+            var updCb = new CheckBox
+            {
+                Content = "自动检查更新（每天最多一次）",
+                IsChecked = Settings.Get("update_check", "1") != "0",
+                Foreground = textBrush,
+                Margin = new Thickness(4, 3, 4, 3),
+            };
+            updCb.Checked += (s, e) => Settings.Set("update_check", "1");
+            updCb.Unchecked += (s, e) => Settings.Set("update_check", "0");
+            root.Children.Add(updCb);
+
             root.Children.Add(new Separator
             {
                 Background = dimBrush,

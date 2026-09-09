@@ -44,13 +44,22 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: dotnet publish installer.csproj -c Release -r win-x64 --self-contained false -v minimal
 
+      - name: Publish (Portable, self-contained single file)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: >
+          dotnet publish AuroraPlayer.csproj -c Release -r win-x64 --self-contained true
+          -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:PublishDir=win-x64/portable/ -v minimal
+
       - name: Collect release artifacts
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item win-x64/publish/AuroraPlayer-Setup.exe dist/ -Force
-          Compress-Archive -Path build/* -DestinationPath dist/Aurora-Portable.zip -Force
+          Copy-Item win-x64/publish/AuroraPlayer-Setup.exe dist/AuroraPlayer-Setup.exe -Force
+          Copy-Item win-x64/portable/AuroraPlayer.exe dist/Aurora-x64-Portable.exe -Force
+          Compress-Archive -Path build/* -DestinationPath dist/Aurora-win64.zip -Force
           Get-ChildItem dist
 
       - name: Create GitHub Release
@@ -59,5 +68,6 @@ jobs:
         with:
           files: |
             dist/AuroraPlayer-Setup.exe
-            dist/Aurora-Portable.zip
+            dist/Aurora-x64-Portable.exe
+            dist/Aurora-win64.zip
           generate_release_notes: true

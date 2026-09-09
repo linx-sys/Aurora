@@ -472,10 +472,7 @@ namespace Aurora
 
         internal static void Dbg(string msg)
         {
-            try { System.IO.File.AppendAllText(
-                System.IO.Path.Combine(System.IO.Path.GetTempPath(), "aurora_debug.log"),
-                DateTime.Now.ToString("HH:mm:ss.fff") + " [" + Environment.CurrentManagedThreadId + "] " + msg + "\r\n"); }
-            catch { }
+            Logger.Dbg(msg);   // P3：统一到 %LOCALAPPDATA%\Aurora\Logs\aurora.log（带轮转）
         }
 
         /// <summary>在 UI 线程执行操作（PlayerEngine 后台回调统一入口）。</summary>

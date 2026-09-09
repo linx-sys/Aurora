@@ -124,6 +124,7 @@ namespace Aurora
             {
                 WindowChromeController.EnableRoundedCorners(Win);
                 StartPipeServer();
+                StartUpdateCheck();
                 if (!string.IsNullOrEmpty(openFile) && File.Exists(openFile))
                 {
                     string dir = LibraryImportController.SafeDir(openFile);
@@ -797,6 +798,26 @@ namespace Aurora
         {
             SingleInstanceServer.Start(path =>
                 Win.Dispatcher.BeginInvoke((Action)(() => OpenExternalFile(path))));
+        }
+
+        /// <summary>启动 5 秒后后台检查更新（24h 节流）；发现新版本 Toast 提示并打开发布页。</summary>
+        void StartUpdateCheck()
+        {
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                System.Threading.Thread.Sleep(5000);   // 避开启动高峰，不抢扫描/渲染资源
+                UpdateChecker.CheckAsync(ver =>
+                    Win.Dispatcher.BeginInvoke((Action)(() =>
+                    {
+                        Toast("发现新版本 v" + ver + "（当前 v" + AppInfo.Version + "），正在打开发布页…");
+                        try
+                        {
+                            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                                AppInfo.ReleasesUrl) { UseShellExecute = true });
+                        }
+                        catch (Exception ex) { MainViewModel.Dbg("open releases FAIL: " + ex.Message); }
+                    })));
+            });
         }
 
         void OpenExternalFile(string path)

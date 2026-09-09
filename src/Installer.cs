@@ -22,7 +22,7 @@ namespace Aurora
 {
     static class Installer
     {
-        const string Version = "1.0.0";
+        static string Version { get { return AppInfo.Version; } }   // 与主程序同源（AppInfo.cs 编译进安装器）
         const string ExeName = "AuroraPlayer.exe";
 
         [DllImport("user32.dll")]
