@@ -283,17 +283,20 @@ namespace Aurora
         public void PreloadNextIfNearEnd()
         {
             if (Tracks.Count == 0 || CurrentTrack == null || !IsPlaying) return;
-            if (_playback.Mode == PlayMode.SingleRepeat) return;   // 单曲循环重播自身，无需预热
             TimeSpan dur = _player.Duration;
             if (dur <= TimeSpan.Zero) return;
             double cf = CrossfadeSeconds;
             double remaining = (dur - _player.Position).TotalSeconds;
             if (remaining <= 0 || remaining > (cf > 0 ? cf + 1.5 : 4.0)) return;
 
+            bool singleRepeat = _playback.Mode == PlayMode.SingleRepeat;
+
             if (_pendingNext == null)
             {
-                // 预选下一首（GetNextForAuto 无状态，预选结果与到点决策一致）
-                _pendingNext = _playback.GetNextForAuto(Tracks, CurrentTrack);
+                if (singleRepeat)
+                    _pendingNext = CurrentTrack;   // 单曲循环：预载当前曲（播完时 reader 已释放，走 Load 重播才有效）
+                else
+                    _pendingNext = _playback.GetNextForAuto(Tracks, CurrentTrack);
                 if (_pendingNext != null)
                 {
                     Dbg("Preload next: " + _pendingNext.Title + " (remaining=" + remaining.ToString("0.0") + "s)");
@@ -301,7 +304,8 @@ namespace Aurora
                 }
             }
 
-            if (cf > 0 && _pendingNext != null && remaining <= cf)
+            // 跨淡只对"切到另一首"生效；单曲循环走自然结束+重播（预载保证近零间隙）
+            if (cf > 0 && !singleRepeat && _pendingNext != null && remaining <= cf)
             {
                 Track t = _pendingNext;
                 _pendingNext = null;
@@ -412,10 +416,12 @@ namespace Aurora
                 // 自动切歌：优先用预载决策（保证与预热解码的是同一首，衔接零开销）
                 if (_pendingNext != null) { next = _pendingNext; _pendingNext = null; }
                 else next = _playback.GetNextForAuto(Tracks, CurrentTrack);
-                if (next == null) // 单曲循环：重新播放当前
+                if (next == null) // 单曲循环：重新播放当前曲
                 {
-                    _player.Position = TimeSpan.Zero;
-                    _player.Play();
+                    // P2 管线：播放结束时输入已从混音器移除、解码器已释放，
+                    // 不能再复用旧 reader（Position/Play 均无效），必须走完整 Load 重播
+                    var cur = CurrentTrack;
+                    if (cur != null) PlayTrack(cur, true);
                     return;
                 }
             }
