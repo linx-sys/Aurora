@@ -184,6 +184,9 @@ namespace Aurora
             EmitResource("Aurora.NAudio.Core.dll", Path.Combine(dir, "NAudio.Core.dll"));
             EmitResource("Aurora.NAudio.WinMM.dll", Path.Combine(dir, "NAudio.WinMM.dll"));
             EmitResource("Aurora.NAudio.Wasapi.dll", Path.Combine(dir, "NAudio.Wasapi.dll"));
+            // WinRT 投影（SMTC 媒体键需要）
+            EmitResource("Aurora.Microsoft.Windows.SDK.NET.dll", Path.Combine(dir, "Microsoft.Windows.SDK.NET.dll"));
+            EmitResource("Aurora.WinRT.Runtime.dll", Path.Combine(dir, "WinRT.Runtime.dll"));
             // SQLite（媒体库缓存，MIT）：原生 e_sqlite3 释放到应用根目录供 SQLitePCLRaw 探测
             EmitResource("Aurora.Microsoft.Data.Sqlite.dll", Path.Combine(dir, "Microsoft.Data.Sqlite.dll"));
             EmitResource("Aurora.SQLitePCLRaw.core.dll", Path.Combine(dir, "SQLitePCLRaw.core.dll"));

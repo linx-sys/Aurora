@@ -17,11 +17,19 @@ namespace Aurora
         const string LastCheckKey = "update_last_check";   // UTC ticks
         static readonly TimeSpan CheckInterval = TimeSpan.FromHours(24);
 
+        /// <summary>新版本信息（P2-5 更新体验：版本 + 更新日志 + 安装包直链）。</summary>
+        public class UpdateInfo
+        {
+            public string Version;      // 不带 v 前缀
+            public string Notes;        // Release notes（markdown 原文，已截断）
+            public string SetupUrl;     // AuroraPlayer-Setup.exe 直链（无则 null）
+        }
+
         /// <summary>
-        /// 异步检查更新。onNewVersion(newVersionWithoutV) 在线程池线程回调；
+        /// 异步检查更新。onNewVersion(info) 在线程池线程回调；
         /// 未发现新版本 / 距上次检查不足 24h / 关闭开关 / 网络失败 → 不回调。
         /// </summary>
-        public static void CheckAsync(Action<string> onNewVersion)
+        public static void CheckAsync(Action<UpdateInfo> onNewVersion)
         {
             if (Settings.Get("update_check", "1") == "0") return;
 
@@ -36,13 +44,12 @@ namespace Aurora
             {
                 try
                 {
-                    string tag = FetchLatestTag();
-                    if (tag == null) return;
-                    string ver = tag.TrimStart('v', 'V');
-                    if (IsNewer(ver, AppInfo.Version))
+                    UpdateInfo info = FetchLatest();
+                    if (info == null) return;
+                    if (IsNewer(info.Version, AppInfo.Version))
                     {
-                        MainViewModel.Dbg("Update found: " + ver + " (current " + AppInfo.Version + ")");
-                        if (onNewVersion != null) onNewVersion(ver);
+                        MainViewModel.Dbg("Update found: " + info.Version + " (current " + AppInfo.Version + ")");
+                        if (onNewVersion != null) onNewVersion(info);
                     }
                 }
                 catch (Exception ex)
@@ -52,20 +59,72 @@ namespace Aurora
             });
         }
 
-        static string FetchLatestTag()
+        /// <summary>拉取最新 Release：tag + notes + Setup 包直链（缺失字段尽力而为）。</summary>
+        static UpdateInfo FetchLatest()
         {
-            var req = (HttpWebRequest)WebRequest.Create(AppInfo.ReleasesApi);
+            string json = Fetch(AppInfo.ReleasesApi, "application/vnd.github+json");
+            if (json == null) return null;
+            Match tag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
+            if (!tag.Success) return null;
+
+            var info = new UpdateInfo { Version = tag.Groups[1].Value.TrimStart('v', 'V') };
+            Match body = Regex.Match(json, "\"body\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+            if (body.Success)
+            {
+                // JSON 字符串反转义 + 截断（release notes 是给用户看的，太长截掉）
+                string notes = body.Groups[1].Value
+                    .Replace("\\r\\n", "\n").Replace("\\n", "\n").Replace("\\\"", "\"").Replace("\\\\", "\\");
+                if (notes.Length > 800) notes = notes.Substring(0, 800) + "\n…（更多见发布页）";
+                info.Notes = notes;
+            }
+            // assets 里找 AuroraPlayer-Setup.exe（同一 JSON 对象内 name 在 browser_download_url 之前）
+            Match asset = Regex.Match(json, "\"name\"\\s*:\\s*\"AuroraPlayer-Setup\\.exe\"[^}]*?\"browser_download_url\"\\s*:\\s*\"([^\"]+)\"");
+            if (asset.Success) info.SetupUrl = asset.Groups[1].Value;
+            return info;
+        }
+
+        /// <summary>下载安装包到 target（P2-5：带百分比回调，线程池线程调用）。</summary>
+        public static bool DownloadSetup(string url, string target, Action<int> onPercent)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.UserAgent = "AuroraPlayer/" + AppInfo.Version;
+            req.Timeout = 15000;
+            req.ReadWriteTimeout = 30000;
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            using (var input = resp.GetResponseStream())
+            using (var output = File.Create(target))
+            {
+                long total = resp.ContentLength;
+                var buf = new byte[65536];
+                long done = 0;
+                int lastPercent = -1;
+                int n;
+                while ((n = input.Read(buf, 0, buf.Length)) > 0)
+                {
+                    output.Write(buf, 0, n);
+                    done += n;
+                    if (total > 0 && onPercent != null)
+                    {
+                        int percent = (int)(done * 100 / total);
+                        if (percent != lastPercent && percent % 10 == 0) { lastPercent = percent; onPercent(percent); }
+                    }
+                }
+            }
+            return File.Exists(target);
+        }
+
+        static string Fetch(string url, string accept)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(url);
             req.Timeout = 10000;
             req.ReadWriteTimeout = 10000;
             req.UserAgent = "AuroraPlayer/" + AppInfo.Version;   // GitHub API 必需 UA
-            req.Accept = "application/vnd.github+json";
+            req.Accept = accept;
 
             using (var resp = (HttpWebResponse)req.GetResponse())
             using (var sr = new StreamReader(resp.GetResponseStream()))
             {
-                string json = sr.ReadToEnd();
-                Match m = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
-                return m.Success ? m.Groups[1].Value : null;
+                return sr.ReadToEnd();
             }
         }
 

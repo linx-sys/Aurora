@@ -25,7 +25,7 @@ namespace Aurora
         readonly TextBlock searchHint;
         readonly TextBlock listCount;
         readonly MainViewModel vm;
-        readonly PlayerEngine player;
+        readonly IPlaybackService player;
         readonly Action<string> toast;
 
         bool listOpen;
@@ -38,7 +38,7 @@ namespace Aurora
 
         public PlaylistViewController(Button btnSort, ListBox list, Border listPanel, StackPanel capBar,
             TextBox searchBox, TextBlock searchHint, TextBlock listCount,
-            MainViewModel vm, PlayerEngine player, Action<string> toast)
+            MainViewModel vm, IPlaybackService player, Action<string> toast)
         {
             this.btnSort = btnSort;
             this.list = list;

@@ -100,8 +100,9 @@ namespace Aurora
 
     /// <summary>
     /// 音频播放引擎。常驻混音器架构，支持预加载、跨淡切换与 ReplayGain。
+    /// IPlaybackService 的唯一实现；UI/VM 层仅经接口交互。
     /// </summary>
-    public class PlayerEngine : IDisposable
+    public class PlayerEngine : IPlaybackService
     {
         /// <summary>混音器中的一条曲目输入。</summary>
         class TrackInput
@@ -114,7 +115,9 @@ namespace Aurora
             public bool ReaderDisposed;          // Reader 已释放（防 ObjectDisposedException）
         }
 
-        IWavePlayer _output;
+        IAudioOutput _output;
+        readonly Func<ISampleProvider, IAudioOutput> _outputFactory;   // P1-4：输出设备工厂（测试注入 fake）
+        readonly Func<string, WaveStream> _decoder;                    // P1-4：解码入口（测试注入 fake）
         SampleCaptureProvider _capture;      // 频谱采样（挂在混音器输出）
         MixingSampleProvider _mixer;
         readonly object _lock = new object();
@@ -126,6 +129,7 @@ namespace Aurora
         string _currentPath;
         bool _disposed;
         bool _deviceStopping;                // 主动 Stop 时忽略设备 PlaybackStopped
+        bool _outputFailed;                  // 设备初始化失败（不再重试，播放静默降级）
         float _desiredVolume = 1.0f;         // 主音量（WaveOut.Volume，持久保持）
         float _rgLinear = 1f;                // ReplayGain 线性增益（新输入生效）
 
@@ -175,26 +179,68 @@ namespace Aurora
 
         public string CurrentPath { get { lock (_lock) { return _currentPath; } } }
 
-        public PlayerEngine()
+        /// <summary>生产构造：真实输出设备（WaveOut / WASAPI 独占回退）+ 真实解码器。</summary>
+        public PlayerEngine() : this(null, null) { }
+
+        /// <summary>
+        /// 注入构造（P1-4 可测试性）：输出工厂/解码器为 null 时用生产默认值。
+        /// 生产路径（factory=null）不在此同步建设备——设备创建后台预热（P2-5a 启动提速），
+        /// 首次 Play/Pause/Stop 时按需补建；测试注入则立即创建（同步语义可预期）。
+        /// </summary>
+        public PlayerEngine(Func<ISampleProvider, IAudioOutput> outputFactory, Func<string, WaveStream> decoder)
         {
             State = PlaybackState.Stopped;
+            _outputFactory = outputFactory ?? DefaultCreateOutput;
+            _decoder = decoder ?? AudioDecoders.Open;
             _mixer = new MixingSampleProvider(AudioDecoders.MixerFormat) { ReadFully = false };
             _mixer.MixerInputEnded += OnMixerInputEnded;
             _capture = new SampleCaptureProvider(_mixer);
-            _output = CreateOutput(_capture);
-            if (_output != null) _output.Volume = _desiredVolume;
+            if (outputFactory != null)
+            {
+                EnsureOutput();
+            }
+            else
+            {
+                // 后台预热设备：不抢 UI 线程启动窗口；失败置 _outputFailed，播放时不再重试
+                System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    lock (_lock) { if (!_disposed) EnsureOutput(); }
+                });
+            }
         }
 
-        /// <summary>创建常驻输出设备；WASAPI 独占开启时优先尝试，失败回退 WaveOutEvent。</summary>
-        IWavePlayer CreateOutput(ISampleProvider source)
+        /// <summary>确保输出设备就绪（调用方需持 _lock）；失败置 _outputFailed 不再重试。</summary>
+        void EnsureOutput()
+        {
+            if (_output != null || _outputFailed) return;
+            try
+            {
+                _output = _outputFactory(_capture);
+                if (_output != null)
+                {
+                    _output.Volume = _desiredVolume;
+                    _output.PlaybackStopped += OnDeviceStopped;
+                }
+                else
+                {
+                    _outputFailed = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                _outputFailed = true;
+                MainViewModel.Dbg("Output init FAIL: " + ex.Message);
+            }
+        }
+
+        /// <summary>默认输出工厂：WASAPI 独占开启时优先尝试，失败回退 WaveOutEvent。</summary>
+        static IAudioOutput DefaultCreateOutput(ISampleProvider source)
         {
             if (Settings.Get("wasapi_exclusive", "0") == "1")
             {
                 try
                 {
-                    var device = new MMDeviceEnumerator().GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
-                    var wasapi = new WasapiOut(device, AudioClientShareMode.Exclusive, false, 150);
-                    wasapi.Init(source);
+                    var wasapi = new WasapiAudioOutput(source);
                     MainViewModel.Dbg("Output: WASAPI Exclusive");
                     return wasapi;
                 }
@@ -203,10 +249,7 @@ namespace Aurora
                     MainViewModel.Dbg("WASAPI Exclusive init FAIL -> fallback WaveOutEvent: " + ex.Message);
                 }
             }
-            var waveOut = new WaveOutEvent { DesiredLatency = 150, NumberOfBuffers = 4 };
-            waveOut.PlaybackStopped += OnDeviceStopped;
-            waveOut.Init(source);
-            return waveOut;
+            return new WaveOutAudioOutput(source);
         }
 
         /* ============================================================
@@ -282,7 +325,9 @@ namespace Aurora
         {
             lock (_lock)
             {
-                if (_disposed || _output == null) return;
+                if (_disposed) return;
+                EnsureOutput();
+                if (_output == null) return;
                 if (State != PlaybackState.Playing)
                 {
                     try { _output.Play(); } catch { }
@@ -381,7 +426,7 @@ namespace Aurora
         {
             try
             {
-                WaveStream reader = TakePreloaded(path) ?? AudioDecoders.Open(path);
+                WaveStream reader = TakePreloaded(path) ?? _decoder(path);
                 ISampleProvider normalized = AudioDecoders.NormalizeToMixer(reader.ToSampleProvider());
                 var gain = new GainFadeSampleProvider(normalized) { BaseGain = _rgLinear };
                 return new TrackInput { SessionId = session, Path = path, Reader = reader, Gain = gain };

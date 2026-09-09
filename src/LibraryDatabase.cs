@@ -1,7 +1,8 @@
 /* ============================================================
- * LibraryDatabase.cs — 媒体库 SQLite 缓存
- * P1（评审建议 #5/#6）：解决"每次启动/换目录都要全量解析 ID3/FLAC 标签"
- * 的性能问题。扫描时按指纹（文件大小 + 最后写入时间 UTC）命中缓存直接
+ * LibraryDatabase.cs — 媒体库 SQLite 正式核心存储（ILibraryStore 实现）
+ * P1（评审建议 #5/#6）：指纹缓存解决"每次启动/换目录都要全量解析标签"；
+ * P1-3 升级为正式存储：启动 DB 优先秒开列表，后台扫描做指纹差分同步。
+ * 扫描按指纹（文件大小 + 最后写入时间 UTC）命中直接
  * 复用元数据，未命中才重新解析并回写；目录中已消失的文件清理过期行。
  *
  * 只缓存"贵的"数据：标签文本、时长、标签内嵌封面。
@@ -33,7 +34,12 @@ namespace Aurora
         public double? TrackPeak;      // 采样峰值（防削波钳制用）
     }
 
-    public class LibraryDatabase
+    /// <summary>
+    /// 媒体库 SQLite 存储（ILibraryStore 唯一实现）。
+    /// P1-3 升级：由"扫描缓存"升级为库数据持久化权威层——
+    /// 启动 DB 优先秒开列表，后台扫描指纹差分同步（见 LibraryImportController）。
+    /// </summary>
+    public class LibraryDatabase : ILibraryStore
     {
         readonly string _dbPath;
         SqliteConnection _conn;

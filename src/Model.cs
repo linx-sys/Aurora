@@ -144,7 +144,7 @@ namespace Aurora
         /// 标签元数据，未命中才解析并回写 DB；cleanupDir 非空时清理该目录下已消失文件的过期行。
         /// lrc 文本与外部封面兜底保持每次现读（联网匹配后会出现，不能缓存）。
         /// </summary>
-        public static List<Track> BuildTracksIncremental(IEnumerable<string> files, LibraryDatabase db, string cleanupDir)
+        public static List<Track> BuildTracksIncremental(IEnumerable<string> files, ILibraryStore db, string cleanupDir)
         {
             var lrcMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var audio = new List<string>();
@@ -176,8 +176,37 @@ namespace Aurora
             return result;
         }
 
+        /// <summary>
+        /// DB 优先秒开（P1-3）：由库行直接物化 Track，启动时无需等扫描。
+        /// 每行做一次同名 .lrc 探测与外部封面兜底（现读，规则与扫描期一致）；
+        /// 已消失的文件跳过（等后台差分同步清理 DB 行）。
+        /// </summary>
+        public static List<Track> BuildTracksFromRows(IEnumerable<TrackRow> rows)
+        {
+            var result = new List<Track>();
+            foreach (TrackRow row in rows)
+            {
+                if (row == null || string.IsNullOrEmpty(row.Path) || !File.Exists(row.Path)) continue;
+                var lrcMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                // 同名 lrc 探测：xxx.lrc 优先，其次 xxx.mp3.lrc（与扫描期配对规则一致）
+                string baseName = Path.Combine(Path.GetDirectoryName(row.Path), Path.GetFileNameWithoutExtension(row.Path));
+                string lrc = baseName + ".lrc";
+                if (!File.Exists(lrc)) lrc = baseName + Path.GetExtension(row.Path) + ".lrc";
+                if (File.Exists(lrc)) lrcMap[Path.GetFileNameWithoutExtension(row.Path)] = lrc;
+
+                try
+                {
+                    result.Add(FromMetadata(row.Path, row.Title, row.Artist, row.Album,
+                        TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, lrcMap));
+                }
+                catch { }
+            }
+            result.Sort((a, b) => string.Compare(a.FileName, b.FileName, StringComparison.CurrentCultureIgnoreCase));
+            return result;
+        }
+
         /// <summary>构建单条轨道：缓存命中走 FromMetadata 复用，未命中解析并记入回写队列。</summary>
-        static Track BuildOne(string path, Dictionary<string, string> lrcMap, LibraryDatabase db, List<TrackRow> toUpsert)
+        static Track BuildOne(string path, Dictionary<string, string> lrcMap, ILibraryStore db, List<TrackRow> toUpsert)
         {
             Library.GetFingerprint(path, out long bytes, out long mtime);
             TrackRow row = db != null ? db.TryGet(path) : null;

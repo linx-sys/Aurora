@@ -16,19 +16,19 @@ namespace Aurora
 {
     public class LibraryImportController
     {
-        /// <summary>共享媒体库缓存（SQLite；增量扫描指纹复用）。路径 %APPDATA%\AuroraPlayer\library.db。</summary>
-        public static readonly LibraryDatabase Db = new LibraryDatabase(LibraryDatabase.DefaultPath);
-
         readonly Window win;
         readonly MainViewModel vm;
+        readonly ILibraryStore store;   // 音乐库正式核心存储（P1-3：DB 优先秒开 + 差分同步）
         readonly Action<string> toast;
         readonly Action<Track, bool> playTrack;   // 当前曲目切换（业务在 ViewModel.PlayTrack）
         bool isLoadingDir;
 
-        public LibraryImportController(Window win, MainViewModel vm, Action<string> toast, Action<Track, bool> playTrack)
+        public LibraryImportController(Window win, MainViewModel vm, ILibraryStore store,
+            Action<string> toast, Action<Track, bool> playTrack)
         {
             this.win = win;
             this.vm = vm;
+            this.store = store;
             this.toast = toast;
             this.playTrack = playTrack;
         }
@@ -49,7 +49,11 @@ namespace Aurora
             }
         }
 
-        /// <summary>加载目录（替换现有列表）。</summary>
+        /// <summary>
+        /// 加载目录（替换现有列表）。P1-3 两段式：
+        /// ① DB 优先秒开——库行直接物化列表立即填充（仅视觉，不触发播放）；
+        /// ② 后台差分同步——枚举文件系统做指纹差分 upsert/清理，权威结果整表替换并恢复播放状态。
+        /// </summary>
         public void LoadDirectory(string dir, string autoPlayPath, bool silent)
         {
             if (isLoadingDir) return;
@@ -59,11 +63,25 @@ namespace Aurora
             string auto = autoPlayPath;
             ThreadPool.QueueUserWorkItem(_ =>
             {
+                // ① DB 秒开（有缓存行时几乎瞬时出列表；已消失文件被跳过）
+                List<TrackRow> cached = store.GetByPrefix(d);
+                if (cached.Count > 0)
+                {
+                    List<Track> quick = Library.BuildTracksFromRows(cached);
+                    if (quick.Count > 0)
+                    {
+                        win.Dispatcher.BeginInvoke((Action)(() =>
+                        {
+                            vm.SearchText = "";   // 换目录清空搜索词，避免旧词把新列表全过滤掉
+                            vm.Playlist.ReplaceTracks(quick);   // 单次批量刷新（唯一数据源）
+                        }));
+                    }
+                }
+
+                // ② 差分同步（权威）：枚举 → 指纹差分 upsert / 清理过期行 → 整表替换
                 var files = new List<string>();
                 Library.EnumerateFiles(d, files, 0);
-                // 增量扫描：指纹（大小+最后写入时间）命中 SQLite 缓存直接复用元数据，
-                // 未命中才解析标签并回写；同时清理目录下已消失文件的过期行
-                List<Track> built = Library.BuildTracksIncremental(files, Db, d);
+                List<Track> built = Library.BuildTracksIncremental(files, store, d);
                 win.Dispatcher.BeginInvoke((Action)(() =>
                 {
                     isLoadingDir = false;
@@ -110,7 +128,7 @@ namespace Aurora
                     }
                     catch { }
                 }
-                List<Track> built = Library.BuildTracksIncremental(files, Db, null);   // 追加导入：只 upsert 不清理
+                List<Track> built = Library.BuildTracksIncremental(files, store, null);   // 追加导入：只 upsert 不清理
                 win.Dispatcher.BeginInvoke((Action)(() =>
                 {
                     int added = vm.Playlist.AddRange(built);   // 去重 + 单次批量刷新（唯一数据源）

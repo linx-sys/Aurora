@@ -20,7 +20,7 @@ namespace Aurora
         readonly Grid root;                 // 主题资源查找（TryFindResource）
         readonly StackPanel panel;          // FpLyricsPanel
         readonly ScrollViewer scroll;       // FpLyricsScroll
-        readonly PlayerEngine player;       // 点击歌词跳转时读 Duration / 写 Position
+        readonly IPlaybackService player;   // 点击歌词跳转时读 Duration / 写 Position
         readonly Func<bool> isDark;         // 主题状态（普通歌词色随主题变化）
         readonly Func<bool> isListOpen;     // 点击歌词跳转后收起列表面板（若开着）
         readonly Action closeListPanel;
@@ -35,7 +35,7 @@ namespace Aurora
         /// <summary>当前歌词高亮色（取自歌曲配色；与黑胶彩胶/标题装饰条呼应）。</summary>
         Color lyricAccent = Color.FromRgb(0x60, 0xA5, 0xFA);
 
-        public LyricsViewController(Grid root, StackPanel panel, ScrollViewer scroll, PlayerEngine player,
+        public LyricsViewController(Grid root, StackPanel panel, ScrollViewer scroll, IPlaybackService player,
             Func<bool> isDark, Func<bool> isListOpen, Action closeListPanel)
         {
             this.root = root;

@@ -15,7 +15,7 @@
 ✓ **ReplayGain 2.0** — EBU R128 响度均衡，歌与歌之间不再忽大忽小（可关）
 ✓ **无缝衔接** — 常驻混音器管线 + 剩余 <4s 预加载下一首；可选跨淡入淡出（0–12 秒可调，设置勾选默认 2 秒）
 ✓ **WASAPI 独占** — 发烧友可选的独占输出（不可用时自动回退）
-✓ **大曲库友好** — SQLite 媒体库缓存 + 增量扫描，二次扫描不再重复解析标签
+✓ **大曲库友好** — SQLite 正式核心存储：启动秒开列表 + 后台差分同步，二次扫描不再重复解析标签
 ✓ **中文兼容** — 老歌 GBK 标签/歌词自动识别，无乱码
 ✓ **智能匹配** — 酷狗 → 网易云双源降级，标题+歌手打分防翻唱误配
 ✓ **单实例** — 双击新歌唤起现有窗口，绝不开第二个进程
@@ -28,7 +28,7 @@
 | **Aurora-x64-Portable.exe** | 免安装 / U 盘党 | 自包含单文件（内嵌 .NET 10 运行时），下载即双击，不写注册表 |
 | **Aurora-win64.zip** | 便携目录 | 解压即用的完整文件版（同样需 .NET 10 Desktop Runtime） |
 
-> 从 [Releases](https://github.com/linx-sys/Aurora/releases) 下载。框架依赖版本需要 [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)（Win10 1607+ / Win11）；未安装时启动会提示"找不到托管 DLL"。
+> 从 [Releases](https://github.com/linx-sys/Aurora/releases) 下载。框架依赖版本需要 [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)（**Win10 1809+** / Win11，SMTC 媒体键需要）；未安装时启动会提示"找不到托管 DLL"。
 >
 > 应用内置**更新检查**（每 24h 最多一次，可在设置中关闭）：发现新版本会提示并打开发布页。
 
@@ -69,9 +69,11 @@ AuroraPlayer.exe /unassociate   # 取消关联并清理注册表项
 | 播放列表 | 封面缩略图抽屉、拖动排序、搜索（标题/歌手/专辑/文件名）、5 种排序、删除动画 |
 | 歌词 | 同名 `.lrc` 自动加载、逐行高亮滚动、点击行跳转；元数据分组展示 |
 | 联网匹配 | 按格式开关、缓存统计与一键清除（`%LOCALAPPDATA%\Aurora\Cache\`） |
+| 更新体验 | 发现新版本展示更新日志，确认后带进度下载、一键唤起安装器；便携版提示并跳发布页（不静默替换文件） |
 | 播放模式 | 列表循环 / 单曲循环 / 随机（随机维护播放轨迹：上一首真回退、下一首可前进） |
 | 封面 | 内嵌封面优先；无封面按歌名生成专属渐变封面（10 组极光配色） |
-| 记忆 | 上次文件夹、音量、播放模式、主题、上次播放曲目，重启自动恢复 |
+| 记忆 | 上次文件夹（DB 秒开恢复）、音量、播放模式、主题、上次播放曲目，重启自动恢复 |
+| 系统集成 | SMTC 媒体键/锁屏控制/系统媒体浮层 · 任务栏进度条 · JumpList 最近播放 · 9 格式文件关联 |
 | 快捷键 | `空格` 播放暂停 · `←→` 快进快退 5 秒 · `↑↓` 音量（步进 5%）· `N/P` 切歌 · `M` 静音 · `Esc` 收起播放列表抽屉（搜索框内输入不触发快捷键） |
 | 音频管线 | 常驻混音器（48kHz float），多声道截断 / 单声道转立体声 / 重采样自动归一 |
 
@@ -90,7 +92,7 @@ AuroraPlayer.exe /unassociate   # 取消关联并清理注册表项
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1    # 4 步：主程序 → 卸载器 → 安装器 → Portable
-dotnet test tests/Aurora.Tests.csproj                 # 173 个单元测试
+dotnet test tests/Aurora.Tests.csproj                 # 191 个单元测试
 ```
 
 依赖：NAudio / NVorbis / Microsoft.Data.Sqlite 由 NuGet 锁定版本还原；Concentus（NuGet 未上架）随 `lib/` 提供，均为 MIT。CI（GitHub Actions）自动执行构建 + 测试，打 `v*` tag 自动发布 Release。
@@ -101,7 +103,7 @@ dotnet test tests/Aurora.Tests.csproj                 # 173 个单元测试
 - 频谱 UI 未启用（管线已内置 PCM 样本抓取，接入即可）
 - 随机播放"上一首"仅本会话有效
 - ReplayGain 为懒分析：每首歌首次播放时后台分析，完成后的播放才应用增益
-- 更新检查仅提示 + 打开发布页，不自动替换程序文件
+- 更新检查仅提示/下载 + 唤起安装器，不自动替换程序文件
 
 ## 文档
 

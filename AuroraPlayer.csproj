@@ -2,7 +2,10 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <!-- P2-5 SMTC：带版本 TFM 才引入 WinRT 投影（Microsoft.Windows.SDK.NET.dll）；
+         SupportedOSPlatformVersion 维持运行基线（SMTC 在旧系统上运行时静默禁用） -->
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>disable</Nullable>
@@ -39,6 +42,10 @@
     <Compile Include="src\NetMatch.cs" />
     <Compile Include="src\NetMatchSettingsDialog.cs" />
     <Compile Include="src\ILyricsProvider.cs" />
+    <Compile Include="src\IPlaybackService.cs" />
+    <Compile Include="src\IAudioOutput.cs" />
+    <Compile Include="src\WaveOutAudioOutput.cs" />
+    <Compile Include="src\WasapiAudioOutput.cs" />
     <Compile Include="src\PlayerEngine.cs" />
     <Compile Include="src\TagReaderService.cs" />
     <Compile Include="src\Tags.cs" />
@@ -53,13 +60,21 @@
     <Compile Include="src\AudioDecoders.cs" />
     <Compile Include="src\GainFadeSampleProvider.cs" />
     <Compile Include="src\PlaylistViewController.cs" />
+    <Compile Include="src\ILibraryStore.cs" />
     <Compile Include="src\LibraryDatabase.cs" />
     <Compile Include="src\Loudness.cs" />
     <Compile Include="src\Logger.cs" />
     <Compile Include="src\UpdateChecker.cs" />
     <Compile Include="src\LibraryImportController.cs" />
     <Compile Include="src\SingleInstanceServer.cs" />
+    <Compile Include="src\SmTcController.cs" />
     <Compile Include="src\WindowChromeController.cs" />
+    <Compile Include="src\UiUtil.cs" />
+    <Compile Include="src\ToastController.cs" />
+    <Compile Include="src\PlaybackTickController.cs" />
+    <Compile Include="src\HotkeyController.cs" />
+    <Compile Include="src\NetMatchViewController.cs" />
+    <Compile Include="src\WindowMiscController.cs" />
   </ItemGroup>
 
   <ItemGroup>

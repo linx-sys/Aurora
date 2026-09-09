@@ -1,30 +1,21 @@
 /* ============================================================
  * MainWindow.cs — Aurora 播放页（唯一界面）
  * 黑胶唱片 + 居左歌词 + 底部控制条；双击 MP3 / 拖放 / 文件夹导入
+ * 职责收敛：仅保留装配根（FindControls）、VM→UI 唯一桥（OnVmPropertyChanged）、
+ * 播放状态 UI（图标/音量/曲目信息）与事件薄委托。
+ * Toast/快捷键/进度计时/联网匹配/窗口杂项已拆至对应 Controller。
  * ============================================================ */
 using System;
-using System.Linq;
 using System.ComponentModel;
-using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Media.Imaging;
 using System.Windows.Controls.Primitives;
 using System.Windows.Shapes;
 using System.Windows.Threading;
-using Microsoft.Win32;
-using WinForms = System.Windows.Forms;
-using IOPath = System.IO.Path;
 using WPath = System.Windows.Shapes.Path;
 
 namespace Aurora
@@ -33,40 +24,37 @@ namespace Aurora
     {
         public Window Win;
         Grid root;
-        PlayerEngine Player;
+        IPlaybackService Player;
         MainViewModel ViewModel;
-        Button BtnOpenFolder, BtnMin, BtnClose, BtnMode, BtnPrev, BtnPlay, BtnNext, BtnMute, BtnTheme, BtnNet, BtnList, BtnFull;
+        Button BtnOpenFolder, BtnMin, BtnClose, BtnMode, BtnPlay, BtnMute, BtnTheme, BtnNet, BtnList;
         WPath IcoRepeat, IcoShuffle; Grid IcoOne;
-        WPath IcoPlay, IcoPause, IcoMoon, IcoSun, IcoMax, IcoRestore;
-        TextBlock FpTitle, FpArtist, CurTime, DurTime, VolLabelV, ToastTb;
+        WPath IcoPlay, IcoPause, IcoMoon, IcoSun;
+        TextBlock FpTitle, FpArtist, VolLabelV;
         System.Windows.Shapes.Rectangle FpTitleBar;
         StackPanel FpLyricsPanel;
-        Border SeekFill, VolFillV, ToastCard, SeekTrackBg; Grid SeekHit, VolHitV, FullPlayer;
-        Ellipse SeekThumb, VolThumbV; ScrollViewer FpLyricsScroll;
+        Border VolFillV; Grid VolHitV, FullPlayer;
+        Ellipse VolThumbV;
         WPath IcoVol; Grid IcoMuted;
-        System.Windows.Shapes.Ellipse VinylDisc; Grid VinylSpin;
-        RotateTransform VinylRotate, ArmRotate; ImageBrush VinylCover;
+        System.Windows.Shapes.Ellipse VinylDisc; ImageBrush VinylCover;
+        RotateTransform ArmRotate;
         Popup VolPopup;
         DispatcherTimer volAutoCloseTimer;   // 音量弹层自动收起
 
         LyricsViewController Lyrics;   // 歌词渲染控制器（渲染/高亮/滚动/配色）
         PlaylistViewController PlaylistView;   // 播放列表视图控制器（抽屉/拖动排序/删除/计数）
         LibraryImportController Importer;   // 媒体库导入控制器（扫描/拖放导入/播放恢复）
+        ThemeController Theme;
 
-        // ===== 播放状态只读视图（唯一数据源在 MainViewModel / PlaylistManager）=====
-        // 此前本类与 ViewModel 各存一份 tracks/view/current/mode/volume/playing，
-        // 靠 PropertyChanged 手工互相同步，属典型状态双写；现全部收敛为 VM 单源，
-        // 这些标识符只是只读代理，任何写入都必须经由 ViewModel。
-        PlaylistManager Playlist { get { return ViewModel.Playlist; } }
-        ObservableCollection<Track> tracks { get { return ViewModel.Tracks; } }
-        ObservableCollection<Track> view { get { return ViewModel.View; } }
+        // ===== 拆分出的视图控制器 =====
+        ToastController ToastCtrl;           // Toast 提示条
+        PlaybackTickController Tick;         // 33ms 进度/黑胶/任务栏计时（含进度条拖动）
+        HotkeyController Hotkey;             // 全局快捷键
+        NetMatchViewController NetMatchView; // 联网匹配歌词/封面
+        WindowMiscController Misc;           // 窗口图标/单实例/更新检查/外部文件
+        SmTcController SmTc;                 // 系统媒体传输控制（媒体键/锁屏浮层，P2-5）
+
+        // 播放状态只读代理：唯一数据源在 ViewModel，写入必须经由它
         Track current { get { return ViewModel.CurrentTrack; } }
-        bool playing { get { return ViewModel.IsPlaying; } }
-
-        readonly HashSet<string> netMatchFailed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        bool isLoadingDir;
-        DispatcherTimer uiTimer, toastTimer;
-        bool seekingDrag;
 
         public MainWindow(string openFile)
         {
@@ -104,8 +92,8 @@ namespace Aurora
             HookEvents();
             // 播放模式/音量从设置恢复：直接写入 ViewModel（唯一数据源，
             // 图标/Tooltip/音量条由 OnVmPropertyChanged 联动刷新）
-            ViewModel.Mode = (PlayMode)ParseInt(Settings.Get("mode", "0"));
-            ApplyVolume(Clamp(ParseDouble(Settings.Get("volume", "0.8")), 0, 1));
+            ViewModel.Mode = (PlayMode)UiUtil.ParseInt(Settings.Get("mode", "0"));
+            ApplyVolume(UiUtil.Clamp(UiUtil.ParseDouble(Settings.Get("volume", "0.8")), 0, 1));
             SetPlaying(false);
             UpdateTrackInfo(null);
 
@@ -115,16 +103,13 @@ namespace Aurora
                 ProgressState = System.Windows.Shell.TaskbarItemProgressState.None
             };
 
-            uiTimer = new DispatcherTimer(DispatcherPriority.Render);
-            uiTimer.Interval = TimeSpan.FromMilliseconds(33);
-            uiTimer.Tick += UiTick;
-            uiTimer.Start();
+            Tick.Start();
 
             Win.Loaded += (s, e) =>
             {
                 WindowChromeController.EnableRoundedCorners(Win);
-                StartPipeServer();
-                StartUpdateCheck();
+                Misc.StartPipeServer();
+                Misc.StartUpdateCheck();
                 if (!string.IsNullOrEmpty(openFile) && File.Exists(openFile))
                 {
                     string dir = LibraryImportController.SafeDir(openFile);
@@ -150,7 +135,9 @@ namespace Aurora
         void FindControls()
         {
             Player = new PlayerEngine();
-            ViewModel = new MainViewModel(Player);
+            // 音乐库正式核心存储（P1-3）：VM（RG 回写/查询）与导入控制器（秒开+差分同步）共享同一实例
+            ILibraryStore library = new LibraryDatabase(LibraryDatabase.DefaultPath);
+            ViewModel = new MainViewModel(Player, library);
             Win.DataContext = ViewModel;
             ViewModel.PropertyChanged += OnVmPropertyChanged;
             ViewModel.CurrentTrackChanged += OnCurrentTrackChanged;
@@ -158,9 +145,7 @@ namespace Aurora
             BtnMin = F<Button>("BtnMin");
             BtnClose = F<Button>("BtnClose");
             BtnMode = F<Button>("BtnMode");
-            BtnPrev = F<Button>("BtnPrev");
             BtnPlay = F<Button>("BtnPlay");
-            BtnNext = F<Button>("BtnNext");
             BtnMute = F<Button>("BtnMute");
             BtnTheme = F<Button>("BtnTheme");
             BtnNet = F<Button>("BtnNet");
@@ -171,21 +156,12 @@ namespace Aurora
             IcoPause = F<WPath>("IcoPause");
             IcoMoon = F<WPath>("IcoMoon");
             IcoSun = F<WPath>("IcoSun");
-            IcoMax = F<WPath>("IcoMax");
-            IcoRestore = F<WPath>("IcoRestore");
             FpTitle = F<TextBlock>("FpTitle");
             FpArtist = F<TextBlock>("FpArtist");
             FpTitleBar = F<Rectangle>("FpTitleBar");
-            CurTime = F<TextBlock>("CurTime");
-            DurTime = F<TextBlock>("DurTime");
-            VolLabelV = F<TextBlock>("VolLabelV");
-            ToastTb = F<TextBlock>("ToastTb");
             FpLyricsPanel = F<StackPanel>("FpLyricsPanel");
             FpLyricsScroll = F<ScrollViewer>("FpLyricsScroll");
-            SeekFill = F<Border>("SeekFill");
-            SeekTrackBg = F<Border>("SeekTrackBg");
-            SeekThumb = F<System.Windows.Shapes.Ellipse>("SeekThumb");
-            SeekHit = F<Grid>("SeekHit");
+            VolLabelV = F<TextBlock>("VolLabelV");
             VolFillV = F<Border>("VolFillV");
             VolThumbV = F<System.Windows.Shapes.Ellipse>("VolThumbV");
             VolHitV = F<Grid>("VolHitV");
@@ -193,12 +169,8 @@ namespace Aurora
             IcoVol = F<WPath>("IcoVol");
             IcoMuted = F<Grid>("IcoMuted");
             BtnList = F<Button>("BtnList");
-            BtnFull = F<Button>("BtnFull");
-            ToastCard = F<Border>("ToastCard");
             FullPlayer = F<Grid>("FullPlayer");
             VinylDisc = F<System.Windows.Shapes.Ellipse>("VinylDisc");
-            VinylSpin = F<Grid>("VinylSpin");
-            VinylRotate = F<RotateTransform>("VinylRotate");
             ArmRotate = F<RotateTransform>("ArmRotate");
             VinylCover = F<ImageBrush>("VinylCover");
 
@@ -214,20 +186,52 @@ namespace Aurora
                 F<StackPanel>("CapBar"), F<TextBox>("SearchBox"), F<TextBlock>("SearchHint"),
                 F<TextBlock>("ListCountTb"), ViewModel, Player, Toast);
 
-            // 媒体库导入控制器：扫描/导入/播放恢复
-            Importer = new LibraryImportController(Win, ViewModel, Toast,
+            // 媒体库导入控制器：DB 优先秒开 + 差分同步/导入/播放恢复
+            Importer = new LibraryImportController(Win, ViewModel, library, Toast,
                 (t, auto) => ViewModel.PlayTrack(t, auto));
 
             // 主题控制器：切主题后联动歌词重染
             Theme = new ThemeController(root, Win, IcoMoon, IcoSun, onApplied: () => Lyrics.OnThemeChanged());
+
+            // ===== P0 精简拆分出的控制器 =====
+            ToastCtrl = new ToastController(F<Border>("ToastCard"), F<TextBlock>("ToastTb"));
+
+            NetMatchView = new NetMatchViewController(Win, ViewModel, Lyrics,
+                updateTrackInfo: UpdateTrackInfo, toast: Toast, isDark: () => Theme.IsDark);
+
+            Misc = new WindowMiscController(Win, ViewModel, Importer, Toast);
+            Misc.SetWinIcons(F<WPath>("IcoMax"), F<WPath>("IcoRestore"));
+
+            Hotkey = new HotkeyController(Win, ViewModel, Player,
+                isListOpen: () => PlaylistView.IsOpen,
+                toggleList: () => PlaylistView.Toggle(),
+                showVolumePopup: ShowVolumePopupTemporarily);
+
+            // 33ms 进度/黑胶/任务栏计时（含进度条拖动交互）整体迁移
+            Tick = new PlaybackTickController(Win, ViewModel, Player, Lyrics,
+                F<Grid>("SeekHit"), F<Border>("SeekFill"), F<Border>("SeekTrackBg"),
+                F<System.Windows.Shapes.Ellipse>("SeekThumb"),
+                F<TextBlock>("CurTime"), F<TextBlock>("DurTime"),
+                F<RotateTransform>("VinylRotate"));
+
+            // 系统媒体传输控制：锁屏/系统浮层 + 媒体键（失败静默禁用；
+            // try 兜到 JIT 级缺失——极端情况下投影 DLL 不在也不影响启动）
+            try
+            {
+                SmTc = new SmTcController(Win, ViewModel);
+                SmTc.Attach();
+            }
+            catch (Exception smtcEx) { MainViewModel.Dbg("SMTC init FAIL: " + smtcEx.Message); SmTc = null; }
         }
+
+        ScrollViewer FpLyricsScroll;
 
         void HookEvents()
         {
             Win.Closing += (s, e) =>
             {
-                try { uiTimer?.Stop(); } catch { }
-                try { toastTimer?.Stop(); } catch { }
+                try { Tick?.Stop(); } catch { }
+                try { ToastCtrl?.Stop(); } catch { }
                 try { volAutoCloseTimer?.Stop(); } catch { }
                 try { Player?.Dispose(); } catch { }
                 Settings.Set("volume", ViewModel.SavedVolume.ToString("0.00", CultureInfo.InvariantCulture));
@@ -240,7 +244,7 @@ namespace Aurora
             BtnClose.Click += (s, e) => Win.Close();
             BtnTheme.Click += (s, e) => Theme.Toggle(Toast);
             BtnOpenFolder.Click += (s, e) => Importer.PickFolder();
-            BtnNet.Click += (s, e) => ShowNetMatchSettings();
+            BtnNet.Click += (s, e) => NetMatchView.ShowSettings();
 
             // 音量：点击图标弹出竖直调节
             BtnMute.Click += (s, e) => { VolPopup.IsOpen = !VolPopup.IsOpen; };
@@ -251,62 +255,22 @@ namespace Aurora
             BtnList.Click += (s, e) => PlaylistView.Toggle();
 
             // 全屏切换
-            BtnFull.Click += (s, e) =>
+            F<Button>("BtnFull").Click += (s, e) =>
                 Win.WindowState = Win.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
             // 全屏/还原图标随窗口状态切换（最大化 → 还原双方框；还原 → 最大化单方框）
-            Win.StateChanged += (s, e) => UpdateWinIcon();
-            UpdateWinIcon();
+            Win.StateChanged += (s, e) => Misc.UpdateWinIcon();
+            Misc.UpdateWinIcon();
 
             // 竖直音量条
-            HookDragBar(VolHitV,
+            UiUtil.HookDragBar(VolHitV,
                 down: ratio => ApplyVolume(ratio),
                 move: ratio => ApplyVolume(ratio),
                 up: ratio => ApplyVolume(ratio),
                 vertical: true);
 
-            // 播放控制按钮已通过 Command Binding 绑定到 ViewModel（TogglePlay/Next/Prev/ToggleMode）
-
-            // 进度条拖动
-            HookDragBar(SeekHit,
-                down: ratio =>
-                {
-                    if (current != null && (Player.Duration > TimeSpan.Zero))
-                    {
-                        seekingDrag = true;
-                        SetSeekUi(ratio, true);
-                    }
-                },
-                move: ratio => { if (seekingDrag) SetSeekUi(ratio, true); },
-                up: ratio =>
-                {
-                    if (seekingDrag)
-                    {
-                        seekingDrag = false;
-                        if (current != null && (Player.Duration > TimeSpan.Zero))
-                            Player.Position = TimeSpan.FromSeconds(ratio * Player.Duration.TotalSeconds);
-                        if (!SeekHit.IsMouseOver) { SeekTrackBg.Height = 4; SeekFill.Height = 4; }
-                    }
-                });
-            SeekHit.MouseEnter += (s, e) =>
-            {
-                SeekTrackBg.Height = 6;
-                SeekFill.Height = 6;
-                if ((Player.Duration > TimeSpan.Zero)) SeekThumb.Visibility = Visibility.Visible;
-            };
-            SeekHit.MouseLeave += (s, e) =>
-            {
-                if (!seekingDrag)
-                {
-                    SeekTrackBg.Height = 4;
-                    SeekFill.Height = 4;
-                    SeekThumb.Visibility = Visibility.Collapsed;
-                }
-            };
-
-            // 播放器事件（PlayerEngine）
-            // 注意：PlaybackEnded 由 ViewModel 订阅处理（自动下一首/单曲循环），
-            // MainWindow 不再重复订阅，避免双重调用导致跳过歌曲或单曲循环冲突。
+            // 播放控制按钮已通过 Command Binding 绑定到 ViewModel（TogglePlay/Next/Prev/ToggleMode）；
+            // 进度条拖动已迁入 PlaybackTickController
 
             // 窗口拖动（黑胶与空白区；歌词/按钮除外）
             FullPlayer.MouseLeftButtonDown += (s, e) =>
@@ -338,11 +302,11 @@ namespace Aurora
                 Importer.ImportPaths(files, true);
             };
 
-            // 快捷键
-            Win.KeyDown += OnKeyDown;
+            // 快捷键（已迁入 HotkeyController）
+            Hotkey.Hook();
         }
 
-                /// <summary>ViewModel 属性变更时更新 UI 图标（播放/暂停/模式）。</summary>
+        /// <summary>ViewModel 属性变更时更新 UI 图标（播放/暂停/模式）。</summary>
         void OnVmPropertyChanged(object sender, PropertyChangedEventArgs e)
         {
             if (e.PropertyName == nameof(ViewModel.IsPlaying))
@@ -387,42 +351,6 @@ namespace Aurora
             BtnMute.ToolTip = muted ? "取消静音 (M)" : "音量 / 静音 (M)";
         }
 
-        void HookDragBar(Grid hit, Action<double> down, Action<double> move, Action<double> up, bool vertical = false)
-        {
-            Func<MouseEventArgs, double> ratioOf = delegate(MouseEventArgs e)
-            {
-                Point p = e.GetPosition(hit);
-                if (vertical)
-                {
-                    double h = hit.ActualHeight;
-                    return h > 0 ? Clamp(1 - p.Y / h, 0, 1) : 0;
-                }
-                double w = hit.ActualWidth;
-                return w > 0 ? Clamp(p.X / w, 0, 1) : 0;
-            };
-            hit.MouseLeftButtonDown += (s, e) =>
-            {
-                hit.CaptureMouse();
-                double r = ratioOf(e);
-                down(r);
-                e.Handled = true;
-            };
-            hit.MouseMove += (s, e) =>
-            {
-                if (Mouse.LeftButton == MouseButtonState.Pressed && hit.IsMouseCaptured) move(ratioOf(e));
-            };
-            hit.MouseLeftButtonUp += (s, e) =>
-            {
-                if (hit.IsMouseCaptured)
-                {
-                    double r = ratioOf(e);
-                    hit.ReleaseMouseCapture();
-                    up(r);
-                }
-                e.Handled = true;
-            };
-        }
-
         /// <summary>音量弹层（快捷键调节时自动弹出并延时收起，让用户看到数值变化）。</summary>
         void ShowVolumePopupTemporarily()
         {
@@ -440,41 +368,6 @@ namespace Aurora
             volAutoCloseTimer.Start();
         }
 
-        /// <summary>元素淡入（切歌时标题/封面/歌词的柔和过渡）。</summary>
-        void FadeIn(UIElement el, int ms = 320)
-        {
-            if (el == null) return;
-            el.BeginAnimation(UIElement.OpacityProperty, null);
-            el.Opacity = 0;
-            var anim = new System.Windows.Media.Animation.DoubleAnimation(1, TimeSpan.FromMilliseconds(ms))
-            {
-                EasingFunction = new System.Windows.Media.Animation.CubicEase { EasingMode = System.Windows.Media.Animation.EasingMode.EaseOut }
-            };
-            el.BeginAnimation(UIElement.OpacityProperty, anim);
-        }
-
-        /* ============================================================
-         * 主题：已拆至 ThemeController
-         * ============================================================ */
-
-        ThemeController Theme;
-
-        /// <summary>窗口最大化时显示"还原"双方框，还原时显示"最大化"单方框。</summary>
-        void UpdateWinIcon()
-        {
-            if (IcoMax == null || IcoRestore == null) return;
-            bool max = Win.WindowState == WindowState.Maximized;
-            IcoMax.Visibility = max ? Visibility.Collapsed : Visibility.Visible;
-            IcoRestore.Visibility = max ? Visibility.Visible : Visibility.Collapsed;
-        }
-
-        /* ============================================================
-         * 视图（播放顺序）
-         * 搜索/排序已全部下沉到 PlaylistManager（唯一数据源）：
-         * SearchText/SortMode setter 即时批量刷新，本类不再维护
-         * 平行的 RefreshViewData 管道。列表计数由 View.CollectionChanged 统一维护。
-         * ============================================================ */
-
         /// <summary>ViewModel 当前曲目变更时更新 UI（歌词/封面/标题/联网匹配）。</summary>
         void OnCurrentTrackChanged(object sender, CurrentTrackChangedEventArgs e)
         {
@@ -487,7 +380,7 @@ namespace Aurora
                 Win.Title = "Aurora · 极光音乐";
                 ViewModel.TotalTimeText = "0:00";
                 ViewModel.CurrentTimeText = "0:00";
-                SetSeekUi(0, false);
+                Tick.SetSeekUi(0, false);
                 Toast(e.FailMessage);
                 return;
             }
@@ -500,43 +393,38 @@ namespace Aurora
                 Win.Title = "Aurora · 极光音乐";
                 ViewModel.TotalTimeText = "0:00";
                 ViewModel.CurrentTimeText = "0:00";
-                SetSeekUi(0, false);
-                UpdateTaskbarProgress();
+                Tick.SetSeekUi(0, false);
+                Tick.UpdateTaskbarProgress();
                 return;
             }
             if (t.Duration > TimeSpan.Zero)
             {
                 t.RefreshDurationText();
-                ViewModel.TotalTimeText = FmtTime(t.Duration);
+                ViewModel.TotalTimeText = UiUtil.FmtTime(t.Duration);
             }
             UpdateTrackInfo(t);
             Lyrics.Render(t);
-            TryNetMatch(t);
+            NetMatchView.TryNetMatch(t);
+            SmTc.UpdateMetadata(t);   // P2-5：系统媒体浮层元数据
             ViewModel.CurrentTimeText = "0:00";
-            SetSeekUi(0, false);
+            Tick.SetSeekUi(0, false);
             Win.Title = t.Title + (t.Artist.Length > 0 ? " - " + t.Artist : "") + " · Aurora";
 
             // 切歌过渡：标题/歌手/黑胶封面/歌词区柔和淡入，替代生硬的内容跳变
-            FadeIn(FpTitle);
-            FadeIn(FpArtist);
-            FadeIn(VinylDisc);
-            FadeIn(FpLyricsPanel);
+            UiUtil.FadeIn(FpTitle);
+            UiUtil.FadeIn(FpArtist);
+            UiUtil.FadeIn(VinylDisc);
+            UiUtil.FadeIn(FpLyricsPanel);
 
             // 列表面板打开时，高亮跟随当前播放曲（含自动切歌），并滚动到可见处；
             // SelectionChanged 里 t == current 判断保证此回写不会二次触发切歌
             PlaylistView.HighlightCurrent();
-            UpdateTaskbarProgress();
+            Tick.UpdateTaskbarProgress();
         }
 
         /* ============================================================
          * 播放控制（业务逻辑唯一入口：ViewModel.PlayTrack）
          * ============================================================ */
-
-        void SetCurrentTrack(Track t, bool autoplay)
-        {
-            // 业务逻辑已下沉到 ViewModel.PlayTrack，UI 更新通过 CurrentTrackChanged 事件处理
-            ViewModel.PlayTrack(t, autoplay);
-        }
 
         void ApplyVolume(double v)
         {
@@ -586,8 +474,9 @@ namespace Aurora
                 ArmRotate.BeginAnimation(RotateTransform.AngleProperty, anim);
             }
             catch { }
-            // 任务栏进度颜色随播放状态切换（绿/黄）
-            UpdateTaskbarProgress();
+            // 任务栏进度颜色随播放状态切换（绿/黄）；同步系统媒体浮层（SMTC）状态
+            Tick.UpdateTaskbarProgress();
+            if (SmTc != null) SmTc.UpdateStatus(p);
         }
 
         void UpdateTrackInfo(Track t)
@@ -614,296 +503,7 @@ namespace Aurora
             try { VinylCover.ImageSource = CoverArt.ForTrack(t, 512); } catch { }
         }
 
-        /* ============================================================
-         * 联网匹配歌词 / 封面（后台线程执行，不阻塞播放）
-         * 播放缺歌词或缺封面的歌曲时触发；缓存命中则不联网；
-         * 结果回到 UI 线程刷新歌词渲染与黑胶封面。
-         * ============================================================ */
-
-        void TryNetMatch(Track t)
-        {
-            if (t == null || netMatchFailed.Contains(t.FilePath)) return;
-            // 按格式的联网匹配开关（联网匹配设置中配置，默认全部启用）
-            if (!NetMatch.EnabledFor(t.FilePath)) return;
-            bool needLyrics = !t.HasLrc && NetMatch.FindLyricFile(t.FilePath) == null;
-            bool needCover = (t.Cover == null || t.Cover.Length == 0) && !NetMatch.HasCover(t.FilePath);
-            if (!needLyrics && !needCover) return;
-
-            NetMatch.Start(t.FilePath, t.Title, t.Artist, result =>
-            {
-                Win.Dispatcher.BeginInvoke((Action)(() => OnNetMatchDone(t, result)));
-            });
-        }
-
-        void OnNetMatchDone(Track t, NetMatchResult r)
-        {
-            if (t == null || r == null) return;
-            bool refreshLyrics = false, refreshCover = false;
-
-            if (r.LyricsMatched && File.Exists(r.LyricPath))
-            {
-                try { t.LrcText = File.ReadAllText(r.LyricPath, Encoding.UTF8); } catch { }
-                refreshLyrics = true;
-            }
-            if (r.CoverMatched && File.Exists(r.CoverPath))
-            {
-                try { t.Cover = File.ReadAllBytes(r.CoverPath); } catch { }
-                refreshCover = true;
-                t.InvalidateThumb();   // 丢弃旧的生成封面缩略图，列表改用新封面
-            }
-
-            if (current == t)
-            {
-                if (refreshLyrics) Lyrics.Render(t);
-                ViewModel.PreloadNextIfNearEnd();   // P2：临结束预热下一首 / 到点跨淡切换
-                if (refreshCover) UpdateTrackInfo(t);
-            }
-
-            if (r.LyricsMatched || r.CoverMatched)
-            {
-                var parts = new List<string>();
-                if (r.LyricsMatched) parts.Add("歌词");
-                if (r.CoverMatched) parts.Add("封面");
-                Toast("已联网匹配" + string.Join("、", parts) + "（" + r.Source + "）");
-            }
-            else if (r.NotFound)
-            {
-                netMatchFailed.Add(t.FilePath);   // 确认不存在，本次会话不再重试
-                if (current == t) Toast("未找到「" + t.Title + "」的歌词/封面");
-            }
-            else if (current == t)
-            {
-                Toast("联网匹配失败：" + r.Message);
-            }
-        }
-
-        /* ============================================================
-         * 联网匹配设置对话框已拆至 NetMatchSettingsDialog（纯静态展示层）
-         * ============================================================ */
-
-        void ShowNetMatchSettings()
-        {
-            NetMatchSettingsDialog.Show(Win, Theme.IsDark, onCacheCleared: () => netMatchFailed.Clear(), toast: Toast);
-        }
-
-        /* ============================================================
-         * 歌词（居左）：渲染/高亮/滚动/配色已拆至 LyricsViewController
-         * ============================================================ */
-
-        /* ============================================================
-         * UI 计时（进度 / 歌词 / 黑胶）
-         * ============================================================ */
-
-        void SetSeekUi(double ratio, bool showThumb)
-        {
-            double w = SeekHit.ActualWidth;
-            SeekFill.Width = Math.Max(0, Math.Min(1, ratio)) * w;
-            SeekThumb.Margin = new Thickness(ratio * w - 6, 0, 0, 0);
-            if (showThumb) SeekThumb.Visibility = Visibility.Visible;
-        }
-
-        void UiTick(object sender, EventArgs e)
-        {
-            // 黑胶旋转（播放时约 10 秒/圈）
-            if (playing)
-                VinylRotate.Angle = (VinylRotate.Angle + 1.2) % 360;
-
-            // 进度
-            if ((Player.Duration > TimeSpan.Zero) && current != null)
-            {
-                double dur = Player.Duration.TotalSeconds;
-                double pos = Player.Position.TotalSeconds;
-                if (dur > 0)
-                {
-                    if (!seekingDrag)
-                    {
-                        SetSeekUi(pos / dur, false);
-                        CurTime.Text = FmtTime(TimeSpan.FromSeconds(pos));
-                        DurTime.Text = FmtTime(TimeSpan.FromSeconds(dur));
-                    }
-                    Lyrics.Sync(pos);
-                }
-            }
-
-            // 任务栏进度（节流：进度值变化超过 0.5% 才写，避免每帧更新绑定）
-            double ratio = (current != null && Player.Duration > TimeSpan.Zero)
-                ? Player.Position.TotalSeconds / Player.Duration.TotalSeconds : 0;
-            if (Math.Abs(ratio - _lastTaskbarRatio) > 0.005 || (ratio == 0 && _lastTaskbarRatio != 0))
-            {
-                _lastTaskbarRatio = ratio;
-                UpdateTaskbarProgress();
-            }
-        }
-
-        double _lastTaskbarRatio = -1;
-
-        /// <summary>Windows 任务栏进度：播放=绿色 / 暂停=黄色 / 无曲=隐藏。</summary>
-        void UpdateTaskbarProgress()
-        {
-            var info = Win.TaskbarItemInfo;
-            if (info == null) return;
-            if (current == null || Player.Duration <= TimeSpan.Zero)
-            {
-                info.ProgressState = System.Windows.Shell.TaskbarItemProgressState.None;
-                _lastTaskbarRatio = -1;
-                return;
-            }
-            double ratio = Clamp(Player.Position.TotalSeconds / Player.Duration.TotalSeconds, 0, 1);
-            info.ProgressState = playing
-                ? System.Windows.Shell.TaskbarItemProgressState.Normal
-                : System.Windows.Shell.TaskbarItemProgressState.Paused;
-            info.ProgressValue = ratio;
-            _lastTaskbarRatio = ratio;
-        }
-
-        static string FmtTime(TimeSpan t)
-        {
-            int s = Math.Max(0, (int)t.TotalSeconds);
-            return (s / 60) + ":" + (s % 60).ToString("00");
-        }
-
-        /* ============================================================
-         * Toast
-         * ============================================================ */
-
-        void Toast(string msg)
-        {
-            ToastTb.Text = msg;
-            ToastCard.Visibility = Visibility.Visible;
-            ToastCard.Opacity = 1;
-            if (toastTimer == null)
-            {
-                toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.6) };
-                toastTimer.Tick += (s, e) =>
-                {
-                    ((DispatcherTimer)s).Stop();
-                    var anim = new System.Windows.Media.Animation.DoubleAnimation(0, TimeSpan.FromMilliseconds(250));
-                    anim.Completed += (s2, e2) => { ToastCard.Visibility = Visibility.Collapsed; };
-                    ToastCard.BeginAnimation(UIElement.OpacityProperty, anim);
-                };
-            }
-            toastTimer.Stop();
-            toastTimer.Start();
-        }
-
-                /* ============================================================
-         * OGG / Opus 格式：FFmpeg 转 WAV 后播放
-         * ============================================================ */
-
-/* ============================================================
-         * 单实例：命名管道接收后续打开的文件（管道服务已拆至 SingleInstanceServer）
-         * ============================================================ */
-
-        void StartPipeServer()
-        {
-            SingleInstanceServer.Start(path =>
-                Win.Dispatcher.BeginInvoke((Action)(() => OpenExternalFile(path))));
-        }
-
-        /// <summary>启动 5 秒后后台检查更新（24h 节流）；发现新版本 Toast 提示并打开发布页。</summary>
-        void StartUpdateCheck()
-        {
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                System.Threading.Thread.Sleep(5000);   // 避开启动高峰，不抢扫描/渲染资源
-                UpdateChecker.CheckAsync(ver =>
-                    Win.Dispatcher.BeginInvoke((Action)(() =>
-                    {
-                        Toast("发现新版本 v" + ver + "（当前 v" + AppInfo.Version + "），正在打开发布页…");
-                        try
-                        {
-                            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
-                                AppInfo.ReleasesUrl) { UseShellExecute = true });
-                        }
-                        catch (Exception ex) { MainViewModel.Dbg("open releases FAIL: " + ex.Message); }
-                    })));
-            });
-        }
-
-        void OpenExternalFile(string path)
-        {
-            if (Win.WindowState == WindowState.Minimized) Win.WindowState = WindowState.Normal;
-            Win.Activate();
-            string dir = LibraryImportController.SafeDir(path);
-            if (dir == null) return;
-            if (current != null && string.Equals(LibraryImportController.SafeDir(current.FilePath), dir, StringComparison.OrdinalIgnoreCase))
-            {
-                Track t = LibraryImportController.FindByPath(view, path) ?? LibraryImportController.FindByPath(tracks, path);
-                if (t != null) { SetCurrentTrack(t, true); return; }
-            }
-            Importer.LoadDirectory(dir, path, false);
-        }
-
-        /* ============================================================
-         * 快捷键
-         * ============================================================ */
-
-        void OnKeyDown(object sender, KeyEventArgs e)
-        {
-            // 焦点在文本框（搜索框）时，字母/空格/方向键都是文本编辑的一部分，
-            // 不得触发全局快捷键（实测：搜索框里输 N/P 会直接切歌、↑↓ 会改音量）；
-            // 仅保留 Esc 收起列表面板的交互
-            if (Keyboard.FocusedElement is System.Windows.Controls.TextBox)
-            {
-                if (e.Key != Key.Escape) return;
-                e.Handled = true;
-                if (PlaylistView.IsOpen) PlaylistView.Toggle();
-                return;
-            }
-
-            // 与界面按钮同源：全部经由 ViewModel 命令 / 属性（唯一播放逻辑入口）
-            switch (e.Key)
-            {
-                case Key.Space:
-                    e.Handled = true;
-                    if (ViewModel.TogglePlayCommand.CanExecute(null)) ViewModel.TogglePlayCommand.Execute(null);
-                    break;
-                case Key.Right:
-                    if (Player.Duration > TimeSpan.Zero)
-                        Player.Position += TimeSpan.FromSeconds(5);
-                    break;
-                case Key.Left:
-                    if (Player.Duration > TimeSpan.Zero)
-                        Player.Position -= TimeSpan.FromSeconds(5);
-                    break;
-                case Key.Up:
-                    ViewModel.Volume = Clamp(ViewModel.Volume + 0.05, 0, 1);
-                    ShowVolumePopupTemporarily();
-                    break;
-                case Key.Down:
-                    ViewModel.Volume = Clamp(ViewModel.Volume - 0.05, 0, 1);
-                    ShowVolumePopupTemporarily();
-                    break;
-                case Key.N:
-                    if (ViewModel.NextCommand.CanExecute(null)) ViewModel.NextCommand.Execute(null);
-                    break;
-                case Key.P:
-                    if (ViewModel.PrevCommand.CanExecute(null)) ViewModel.PrevCommand.Execute(null);
-                    break;
-                case Key.M:
-                    if (ViewModel.ToggleMuteCommand.CanExecute(null)) ViewModel.ToggleMuteCommand.Execute(null);
-                    ShowVolumePopupTemporarily();
-                    break;
-                case Key.Escape:
-                    e.Handled = true;
-                    // Esc 优先收起播放列表抽屉；主界面时不再退出应用（防误触丢状态）
-                    if (PlaylistView.IsOpen) PlaylistView.Toggle();
-                    break;
-            }
-        }
-
-        static double Clamp(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
-
-        static double ParseDouble(string s)
-        {
-            double d;
-            return double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out d) ? d : 0.8;
-        }
-
-        static int ParseInt(string s)
-        {
-            int i;
-            return int.TryParse(s, out i) ? i : 0;
-        }
+        /// <summary>Toast 转发（控制器间经注入回调协作，不互相持有）。</summary>
+        void Toast(string msg) { ToastCtrl.Toast(msg); }
     }
 }

@@ -40,6 +40,9 @@
     <EmbeddedResource Include="build\NAudio.Core.dll" LogicalName="Aurora.NAudio.Core.dll" />
     <EmbeddedResource Include="build\NAudio.WinMM.dll" LogicalName="Aurora.NAudio.WinMM.dll" />
     <EmbeddedResource Include="build\NAudio.Wasapi.dll" LogicalName="Aurora.NAudio.Wasapi.dll" />
+    <!-- WinRT 投影（SMTC 媒体键需要，带版本 TFM 引入） -->
+    <EmbeddedResource Include="build\Microsoft.Windows.SDK.NET.dll" LogicalName="Aurora.Microsoft.Windows.SDK.NET.dll" />
+    <EmbeddedResource Include="build\WinRT.Runtime.dll" LogicalName="Aurora.WinRT.Runtime.dll" />
     <!-- SQLite（媒体库缓存，MIT）：含 win-x64 原生 e_sqlite3 -->
     <EmbeddedResource Include="build\Microsoft.Data.Sqlite.dll" LogicalName="Aurora.Microsoft.Data.Sqlite.dll" />
     <EmbeddedResource Include="build\SQLitePCLRaw.core.dll" LogicalName="Aurora.SQLitePCLRaw.core.dll" />

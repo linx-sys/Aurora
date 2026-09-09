@@ -30,7 +30,8 @@ namespace Aurora
     /// </summary>
     public class MainViewModel : ViewModelBase
     {
-        private readonly PlayerEngine _player;
+        private readonly IPlaybackService _player;
+        private readonly ILibraryStore _library;   // 音乐库正式核心存储（P1-3：RG 分析回写/查询）
         private readonly PlaybackController _playback;
         private readonly PlaylistManager _playlist;
         private readonly System.Windows.Threading.Dispatcher _dispatcher;
@@ -62,9 +63,10 @@ namespace Aurora
             }
         }
 
-        public MainViewModel(PlayerEngine player)
+        public MainViewModel(IPlaybackService player, ILibraryStore library)
         {
             _player = player ?? throw new ArgumentNullException(nameof(player));
+            _library = library ?? throw new ArgumentNullException(nameof(library));
             _playback = new PlaybackController();
             _playlist = new PlaylistManager();
             // 捕获 UI 线程 Dispatcher。
@@ -146,10 +148,40 @@ namespace Aurora
             }
         }
 
+        System.Windows.Threading.DispatcherTimer _searchDebounce;   // 搜索防抖（P2-5）
+        string _searchRaw;
+
         public string SearchText
         {
-            get { return _playlist.SearchText; }
-            set { _playlist.SearchText = value ?? ""; OnPropertyChanged(); }
+            get { return _searchRaw ?? _playlist.SearchText; }
+            set
+            {
+                _searchRaw = value ?? "";
+                // P2-5 搜索防抖：按键输入 200ms 合并后批量刷新（原实现每键全量 O(n log n)）；
+                // 清空走立即路径——换目录等场景需要立刻看到全量列表
+                if (_searchRaw.Length == 0)
+                {
+                    if (_searchDebounce != null) _searchDebounce.Stop();
+                    _playlist.SearchText = "";
+                    OnPropertyChanged();
+                    return;
+                }
+                if (_searchDebounce == null)
+                {
+                    _searchDebounce = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+                    _searchDebounce.Tick += (s, e) =>
+                    {
+                        ((System.Windows.Threading.DispatcherTimer)s).Stop();
+                        if (_playlist.SearchText != _searchRaw)
+                        {
+                            _playlist.SearchText = _searchRaw;
+                            OnPropertyChanged();
+                        }
+                    };
+                }
+                _searchDebounce.Stop();
+                _searchDebounce.Start();
+            }
         }
 
         public int SortMode
@@ -176,7 +208,6 @@ namespace Aurora
             set { SetProperty(ref _seekRatio, value); }
         }
 
-        public PlayerEngine Player { get { return _player; } }
         public PlaybackController Playback { get { return _playback; } }
         public PlaylistManager Playlist { get { return _playlist; } }
 
@@ -345,7 +376,7 @@ namespace Aurora
                 _player.SetReplayGain(1f);
                 return;
             }
-            TrackRow row = LibraryImportController.Db.TryGet(t.FilePath);
+            TrackRow row = _library.TryGet(t.FilePath);
             if (row != null && row.TrackGain.HasValue)
             {
                 _player.SetReplayGain((float)Loudness.LinearFor(row.TrackGain.Value, row.TrackPeak ?? 1.0));
@@ -370,14 +401,14 @@ namespace Aurora
                     Loudness.Result r = Loudness.AnalyzeFile(path);
                     if (r != null)
                     {
-                        TrackRow row = LibraryImportController.Db.TryGet(path)
+                        TrackRow row = _library.TryGet(path)
                             ?? new TrackRow { Path = path, FileName = System.IO.Path.GetFileName(path) };
                         Library.GetFingerprint(path, out long bytes, out long mtime);
                         if (row.Bytes == 0) row.Bytes = bytes;
                         if (row.LastModified == 0) row.LastModified = mtime;
                         row.TrackGain = r.GainDb;
                         row.TrackPeak = r.Peak;
-                        LibraryImportController.Db.Upsert(row);
+                        _library.Upsert(row);
                         Dbg("RG scan done: " + path + " gain=" + r.GainDb.ToString("0.0") + "dB peak=" + r.Peak.ToString("0.00"));
                         RunOnUiThread(() =>
                         {
