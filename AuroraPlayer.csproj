@@ -49,8 +49,11 @@
     <Compile Include="src\OpusWaveReader.cs" />
     <Compile Include="src\PlaybackController.cs" />
     <Compile Include="src\PlaylistManager.cs" />
+    <Compile Include="src\AudioDecoders.cs" />
+    <Compile Include="src\GainFadeSampleProvider.cs" />
     <Compile Include="src\PlaylistViewController.cs" />
     <Compile Include="src\LibraryDatabase.cs" />
+    <Compile Include="src\Loudness.cs" />
     <Compile Include="src\LibraryImportController.cs" />
     <Compile Include="src\SingleInstanceServer.cs" />
     <Compile Include="src\WindowChromeController.cs" />
@@ -59,6 +62,8 @@
   <ItemGroup>
     <!-- NAudio 2.2.1 (MIT) - 音频输出 + 真实频谱样本抓取；元包自动携带 Core/WinMM/Wasapi 子包 -->
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <!-- 混音器/重采样/单声道转立体声在 Core 子包（显式引用，保证编译期可见） -->
+    <PackageReference Include="NAudio.Core" Version="2.2.1" />
     <!-- NVorbis 0.10.4 (MIT) - OGG 纯托管解码 -->
     <PackageReference Include="NVorbis" Version="0.10.4" />
     <!-- Microsoft.Data.Sqlite 10.0.12 (MIT) - 媒体库缓存（增量扫描指纹复用） -->

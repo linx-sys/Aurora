@@ -6,6 +6,7 @@
  * 所有 PlayerEngine 后台线程回调均通过 WPF Dispatcher 切回 UI 线程。
  * ============================================================ */
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows.Input;
 
@@ -44,6 +45,22 @@ namespace Aurora
         private double _seekRatio;
         private bool _isMuted;
         private double _savedVolume = 0.8;
+
+        // ===== P2：预加载 / 跨淡 / ReplayGain =====
+        private Track _pendingNext;                                   // 预载决策的下一首
+        private readonly HashSet<string> _rgScanning = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        public static bool ReplayGainEnabled { get { return Settings.Get("replaygain", "1") != "0"; } }
+
+        /// <summary>跨淡时长秒（0=关）；设置键 crossfade。</summary>
+        public static double CrossfadeSeconds
+        {
+            get
+            {
+                double d;
+                return double.TryParse(Settings.Get("crossfade", "0"), out d) ? Math.Max(0, Math.Min(12, d)) : 0;
+            }
+        }
 
         public MainViewModel(PlayerEngine player)
         {
@@ -231,6 +248,7 @@ namespace Aurora
         {
             if (t == null) return;
             Dbg("PlayTrack: " + t.Title + " autoplay=" + autoplay + " record=" + recordHistory);
+            _pendingNext = null;   // 手动/显式切歌：作废预载决策
             if (recordHistory) _playback.RecordPlay(t);
             CurrentTrack = t;
             // PlayerEngine.Load 内部处理 OGG/OPUS 流式播放（VorbisWaveReader）
@@ -251,9 +269,127 @@ namespace Aurora
             _player.Position = TimeSpan.Zero;
             if (autoplay) { _player.Play(); IsPlaying = true; }
             else IsPlaying = false;
+            ApplyReplayGain(t);
             CurrentTrackChanged?.Invoke(this, new CurrentTrackChangedEventArgs
             {
                 Track = t, AutoPlay = autoplay, LoadFailed = false
+            });
+        }
+
+        /// <summary>
+        /// 临结束巡检（MainWindow.UiTick 每帧调用）：
+        /// 剩余时间进入窗口时预选并预热下一首；开启跨淡时到点直接切换。
+        /// </summary>
+        public void PreloadNextIfNearEnd()
+        {
+            if (Tracks.Count == 0 || CurrentTrack == null || !IsPlaying) return;
+            if (_playback.Mode == PlayMode.SingleRepeat) return;   // 单曲循环重播自身，无需预热
+            TimeSpan dur = _player.Duration;
+            if (dur <= TimeSpan.Zero) return;
+            double cf = CrossfadeSeconds;
+            double remaining = (dur - _player.Position).TotalSeconds;
+            if (remaining <= 0 || remaining > (cf > 0 ? cf + 1.5 : 4.0)) return;
+
+            if (_pendingNext == null)
+            {
+                // 预选下一首（GetNextForAuto 无状态，预选结果与到点决策一致）
+                _pendingNext = _playback.GetNextForAuto(Tracks, CurrentTrack);
+                if (_pendingNext != null)
+                {
+                    Dbg("Preload next: " + _pendingNext.Title + " (remaining=" + remaining.ToString("0.0") + "s)");
+                    _player.Preload(_pendingNext.FilePath);
+                }
+            }
+
+            if (cf > 0 && _pendingNext != null && remaining <= cf)
+            {
+                Track t = _pendingNext;
+                _pendingNext = null;
+                CrossfadeToTrack(t);
+            }
+        }
+
+        /// <summary>跨淡切换到指定曲目（当前曲目淡出、新曲目淡入混入）。</summary>
+        void CrossfadeToTrack(Track t)
+        {
+            Dbg("CrossfadeTo: " + t.Title);
+            _playback.RecordPlay(t);
+            bool ok = _player.CrossfadeTo(t.FilePath, CrossfadeSeconds);
+            if (!ok)
+            {
+                PlayTrack(t, true);   // 跨淡失败（文件缺失/解码失败）回退硬切
+                return;
+            }
+            if (t.Duration == TimeSpan.Zero && _player.Duration > TimeSpan.Zero)
+                t.Duration = _player.Duration;
+            CurrentTrack = t;
+            IsPlaying = true;
+            ApplyReplayGain(t);
+            CurrentTrackChanged?.Invoke(this, new CurrentTrackChangedEventArgs
+            {
+                Track = t, AutoPlay = true, LoadFailed = false
+            });
+        }
+
+        /* ---------------- ReplayGain 2.0 ---------------- */
+
+        /// <summary>应用当前曲目的回放增益（有缓存立即应用；无缓存后台懒分析）。</summary>
+        void ApplyReplayGain(Track t)
+        {
+            if (!ReplayGainEnabled)
+            {
+                _player.SetReplayGain(1f);
+                return;
+            }
+            TrackRow row = LibraryImportController.Db.TryGet(t.FilePath);
+            if (row != null && row.TrackGain.HasValue)
+            {
+                _player.SetReplayGain((float)Loudness.LinearFor(row.TrackGain.Value, row.TrackPeak ?? 1.0));
+                return;
+            }
+            _player.SetReplayGain(1f);
+            ScheduleLoudnessScan(t.FilePath);
+        }
+
+        /// <summary>后台懒分析响度并回写 DB；完成后若仍是当前曲目则实时应用。</summary>
+        void ScheduleLoudnessScan(string path)
+        {
+            lock (_rgScanning)
+            {
+                if (_rgScanning.Contains(path)) return;
+                _rgScanning.Add(path);
+            }
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    Loudness.Result r = Loudness.AnalyzeFile(path);
+                    if (r != null)
+                    {
+                        TrackRow row = LibraryImportController.Db.TryGet(path)
+                            ?? new TrackRow { Path = path, FileName = System.IO.Path.GetFileName(path) };
+                        Library.GetFingerprint(path, out long bytes, out long mtime);
+                        if (row.Bytes == 0) row.Bytes = bytes;
+                        if (row.LastModified == 0) row.LastModified = mtime;
+                        row.TrackGain = r.GainDb;
+                        row.TrackPeak = r.Peak;
+                        LibraryImportController.Db.Upsert(row);
+                        Dbg("RG scan done: " + path + " gain=" + r.GainDb.ToString("0.0") + "dB peak=" + r.Peak.ToString("0.00"));
+                        RunOnUiThread(() =>
+                        {
+                            if (ReplayGainEnabled && CurrentTrack != null &&
+                                string.Equals(CurrentTrack.FilePath, path, StringComparison.OrdinalIgnoreCase))
+                            {
+                                _player.SetReplayGain((float)Loudness.LinearFor(r.GainDb, r.Peak));
+                            }
+                        });
+                    }
+                }
+                catch (Exception ex) { Dbg("RG scan FAIL: " + ex.Message); }
+                finally
+                {
+                    lock (_rgScanning) { _rgScanning.Remove(path); }
+                }
             });
         }
 
@@ -273,7 +409,9 @@ namespace Aurora
             }
             else
             {
-                next = _playback.GetNextForAuto(Tracks, CurrentTrack);
+                // 自动切歌：优先用预载决策（保证与预热解码的是同一首，衔接零开销）
+                if (_pendingNext != null) { next = _pendingNext; _pendingNext = null; }
+                else next = _playback.GetNextForAuto(Tracks, CurrentTrack);
                 if (next == null) // 单曲循环：重新播放当前
                 {
                     _player.Position = TimeSpan.Zero;

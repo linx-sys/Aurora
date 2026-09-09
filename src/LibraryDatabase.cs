@@ -29,6 +29,8 @@ namespace Aurora
         public long Bytes;             // 指纹之一
         public long LastModified;      // 指纹之二：LastWriteTimeUtc.Ticks
         public byte[] Cover;           // 标签内嵌封面（可为 null）
+        public double? TrackGain;      // ReplayGain 2.0 增益 dB（null=未分析）
+        public double? TrackPeak;      // 采样峰值（防削波钳制用）
     }
 
     public class LibraryDatabase
@@ -86,6 +88,18 @@ CREATE TABLE IF NOT EXISTS tracks (
 CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
                 cmd.ExecuteNonQuery();
             }
+
+            // 迁移：ReplayGain 列（旧库补列）
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='track_gain'";
+                long exists = (long)cmd.ExecuteScalar();
+                if (exists == 0)
+                {
+                    cmd.CommandText = "ALTER TABLE tracks ADD COLUMN track_gain REAL; ALTER TABLE tracks ADD COLUMN track_peak REAL;";
+                    cmd.ExecuteNonQuery();
+                }
+            }
         }
 
         /// <summary>指纹命中判定：大小与最后写入时间均未变化。</summary>
@@ -103,7 +117,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
                 EnsureOpen();
                 using (var cmd = _conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT path,file_name,title,artist,album,duration,bytes,last_modified,cover FROM tracks WHERE path=$p";
+                    cmd.CommandText = "SELECT path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak FROM tracks WHERE path=$p";
                     cmd.Parameters.AddWithValue("$p", path);
                     using (var r = cmd.ExecuteReader())
                     {
@@ -125,7 +139,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
                 using (var cmd = _conn.CreateCommand())
                 {
                     // 前缀匹配在 C# 侧做（OrdinalIgnoreCase），SQL 只做范围过滤走索引
-                    cmd.CommandText = "SELECT path,file_name,title,artist,album,duration,bytes,last_modified,cover FROM tracks WHERE path >= $lo AND path < $hi";
+                    cmd.CommandText = "SELECT path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak FROM tracks WHERE path >= $lo AND path < $hi";
                     cmd.Parameters.AddWithValue("$lo", dirPrefix);
                     cmd.Parameters.AddWithValue("$hi", dirPrefix + "\uffff");
                     using (var r = cmd.ExecuteReader())
@@ -147,11 +161,12 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
                 using (var cmd = _conn.CreateCommand())
                 {
                     cmd.CommandText = @"
-INSERT INTO tracks(path,file_name,title,artist,album,duration,bytes,last_modified,cover)
-VALUES($path,$file_name,$title,$artist,$album,$duration,$bytes,$last_modified,$cover)
+INSERT INTO tracks(path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak)
+VALUES($path,$file_name,$title,$artist,$album,$duration,$bytes,$last_modified,$cover,$track_gain,$track_peak)
 ON CONFLICT(path) DO UPDATE SET
     file_name=$file_name, title=$title, artist=$artist, album=$album,
-    duration=$duration, bytes=$bytes, last_modified=$last_modified, cover=$cover";
+    duration=$duration, bytes=$bytes, last_modified=$last_modified, cover=$cover,
+    track_gain=$track_gain, track_peak=$track_peak";
                     Bind(cmd, row);
                     cmd.ExecuteNonQuery();
                 }
@@ -170,11 +185,12 @@ ON CONFLICT(path) DO UPDATE SET
                 {
                     cmd.Transaction = tx;
                     cmd.CommandText = @"
-INSERT INTO tracks(path,file_name,title,artist,album,duration,bytes,last_modified,cover)
-VALUES($path,$file_name,$title,$artist,$album,$duration,$bytes,$last_modified,$cover)
+INSERT INTO tracks(path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak)
+VALUES($path,$file_name,$title,$artist,$album,$duration,$bytes,$last_modified,$cover,$track_gain,$track_peak)
 ON CONFLICT(path) DO UPDATE SET
     file_name=$file_name, title=$title, artist=$artist, album=$album,
-    duration=$duration, bytes=$bytes, last_modified=$last_modified, cover=$cover";
+    duration=$duration, bytes=$bytes, last_modified=$last_modified, cover=$cover,
+    track_gain=$track_gain, track_peak=$track_peak";
                     var pPath = cmd.CreateParameter(); pPath.ParameterName = "$path"; cmd.Parameters.Add(pPath);
                     var pName = cmd.CreateParameter(); pName.ParameterName = "$file_name"; cmd.Parameters.Add(pName);
                     var pTitle = cmd.CreateParameter(); pTitle.ParameterName = "$title"; cmd.Parameters.Add(pTitle);
@@ -184,6 +200,8 @@ ON CONFLICT(path) DO UPDATE SET
                     var pBytes = cmd.CreateParameter(); pBytes.ParameterName = "$bytes"; cmd.Parameters.Add(pBytes);
                     var pMtime = cmd.CreateParameter(); pMtime.ParameterName = "$last_modified"; cmd.Parameters.Add(pMtime);
                     var pCover = cmd.CreateParameter(); pCover.ParameterName = "$cover"; cmd.Parameters.Add(pCover);
+                    var pGain = cmd.CreateParameter(); pGain.ParameterName = "$track_gain"; cmd.Parameters.Add(pGain);
+                    var pPeak = cmd.CreateParameter(); pPeak.ParameterName = "$track_peak"; cmd.Parameters.Add(pPeak);
 
                     foreach (var row in rows)
                     {
@@ -197,6 +215,8 @@ ON CONFLICT(path) DO UPDATE SET
                         pBytes.Value = row.Bytes;
                         pMtime.Value = row.LastModified;
                         pCover.Value = (object)row.Cover ?? DBNull.Value;
+                        pGain.Value = (object)row.TrackGain ?? DBNull.Value;
+                        pPeak.Value = (object)row.TrackPeak ?? DBNull.Value;
                         cmd.ExecuteNonQuery();
                     }
                     tx.Commit();
@@ -261,6 +281,8 @@ ON CONFLICT(path) DO UPDATE SET
                 Bytes = r.IsDBNull(6) ? 0 : r.GetInt64(6),
                 LastModified = r.IsDBNull(7) ? 0 : r.GetInt64(7),
                 Cover = r.IsDBNull(8) ? null : (byte[])r.GetValue(8),
+                TrackGain = r.IsDBNull(9) ? (double?)null : r.GetDouble(9),
+                TrackPeak = r.IsDBNull(10) ? (double?)null : r.GetDouble(10),
             };
         }
 
@@ -275,6 +297,8 @@ ON CONFLICT(path) DO UPDATE SET
             cmd.Parameters.AddWithValue("$bytes", row.Bytes);
             cmd.Parameters.AddWithValue("$last_modified", row.LastModified);
             cmd.Parameters.AddWithValue("$cover", (object)row.Cover ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$track_gain", (object)row.TrackGain ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$track_peak", (object)row.TrackPeak ?? DBNull.Value);
         }
     }
 }

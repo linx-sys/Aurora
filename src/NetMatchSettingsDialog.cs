@@ -29,7 +29,7 @@ namespace Aurora
 
             var dlg = new Window
             {
-                Title = "联网匹配设置",
+                Title = "联网与播放设置",
                 Owner = owner,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 Width = 430,
@@ -67,6 +67,55 @@ namespace Aurora
                 grid.Children.Add(cb);
             }
             root.Children.Add(grid);
+
+            root.Children.Add(new Separator
+            {
+                Background = dimBrush,
+                Opacity = 0.3,
+                Margin = new Thickness(0, 0, 0, 12),
+            });
+
+            // ===== 播放（P2）=====
+            root.Children.Add(new TextBlock
+            {
+                Text = "播放",
+                Foreground = dimBrush,
+                FontSize = 12,
+                Margin = new Thickness(0, 0, 0, 6),
+            });
+
+            var rgCb = new CheckBox
+            {
+                Content = "ReplayGain 音量均衡（ReplayGain 2.0，首次播放需后台分析）",
+                IsChecked = Settings.Get("replaygain", "1") != "0",
+                Foreground = textBrush,
+                Margin = new Thickness(4, 3, 4, 3),
+            };
+            rgCb.Checked += (s, e) => Settings.Set("replaygain", "1");
+            rgCb.Unchecked += (s, e) => Settings.Set("replaygain", "0");
+            root.Children.Add(rgCb);
+
+            var cfCb = new CheckBox
+            {
+                Content = "歌曲间跨淡入淡出（2 秒）",
+                IsChecked = Settings.Get("crossfade", "0") != "0",
+                Foreground = textBrush,
+                Margin = new Thickness(4, 3, 4, 3),
+            };
+            cfCb.Checked += (s, e) => Settings.Set("crossfade", "2");
+            cfCb.Unchecked += (s, e) => Settings.Set("crossfade", "0");
+            root.Children.Add(cfCb);
+
+            var wasapiCb = new CheckBox
+            {
+                Content = "WASAPI 独占输出（设备不支持时自动回退，重启生效）",
+                IsChecked = Settings.Get("wasapi_exclusive", "0") == "1",
+                Foreground = textBrush,
+                Margin = new Thickness(4, 3, 4, 3),
+            };
+            wasapiCb.Checked += (s, e) => Settings.Set("wasapi_exclusive", "1");
+            wasapiCb.Unchecked += (s, e) => Settings.Set("wasapi_exclusive", "0");
+            root.Children.Add(wasapiCb);
 
             root.Children.Add(new Separator
             {

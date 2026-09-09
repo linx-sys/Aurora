@@ -1,11 +1,27 @@
 /* ============================================================
- * PlayerEngine.cs — 音频播放引擎（NAudio 实现，P2 频谱真实化）
- * 从 MainWindow 提取，独立负责音频输出生命周期、播放控制、
- * 进度通知、样本抓取（用于真实频谱，非系统环回）。
+ * PlayerEngine.cs — 音频播放引擎（P2 管线重构）
+ *
+ * 架构：常驻输出设备
+ *   WaveOutEvent（或 WASAPI Exclusive）
+ *     ← SampleCaptureProvider（频谱采样，混音器输出）
+ *     ← MixingSampleProvider（48kHz 立体声 float，ReadFully=false）
+ *        ← 每曲目输入：解码器 → 格式归一化 → GainFadeSampleProvider
+ *
+ * 关键收益：
+ * 1. 设备只建一次 → 切歌不再重建 WaveOut，"PlaybackStopped 竞态"的
+ *    根因消失（原 300ms/200ms/retry×3 经验阈值 workaround 删除）；
+ * 2. 曲目自然结束由 MixerInputEnded 判定并携带会话 ID，过期事件丢弃；
+ * 3. 预加载下一首解码器（Preload）+ CrossfadeTo 跨淡切换 → 无缝衔接；
+ * 4. ReplayGain 增益作用于每输入（SetReplayGain）。
  * ============================================================ */
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using NAudio.Wave;
+using NAudio.CoreAudioApi;
+using NAudio.Wave.SampleProviders;
+using NAudio.Wave.SampleProviders;
 
 namespace Aurora
 {
@@ -37,7 +53,7 @@ namespace Aurora
 
     /// <summary>
     /// 样本抓取包装器：在播放链中插入，复制 PCM 数据给频谱模块。
-    /// 实现 ISampleProvider，不干扰播放线程。
+    /// 实现 ISampleProvider，不干扰播放线程。挂在混音器输出（48k stereo）。
     /// </summary>
     internal class SampleCaptureProvider : ISampleProvider
     {
@@ -83,29 +99,41 @@ namespace Aurora
     }
 
     /// <summary>
-    /// 音频播放引擎。使用 NAudio 输出，支持样本抓取实现真实频谱。
+    /// 音频播放引擎。常驻混音器架构，支持预加载、跨淡切换与 ReplayGain。
     /// </summary>
     public class PlayerEngine : IDisposable
     {
-        private WaveOutEvent _waveOut;
-        private WaveStream _audioFile;
-        private SampleCaptureProvider _capture;
-        private string _currentPath;
-        private bool _disposed;
-        private bool _isPlaying;
-        private float _desiredVolume = 1.0f;   // WaveOut 重建后重放（修复重启后音量丢失）
-        private long _playStartTicks;          // 本次 Play() 的 UTC 计时（快速停止防护用）
-        private int _fastStopRetries;          // 快速停止重试计数（防死循环）
+        /// <summary>混音器中的一条曲目输入。</summary>
+        class TrackInput
+        {
+            public long SessionId;
+            public string Path;
+            public WaveStream Reader;            // 源格式（Position/TotalTime）
+            public GainFadeSampleProvider Gain;  // 归一化后的混音器输入
+            public bool InMixer;
+            public bool ReaderDisposed;          // Reader 已释放（防 ObjectDisposedException）
+        }
 
-        // ===== 播放会话（PlaybackSession）=====
-        // 每次 Load() 递增。所有异步事件（PlaybackStopped/PlaybackEnded）在触发源处
-        // 捕获所属会话 ID；订阅方/引擎比对 ID 不一致即判定为过期事件直接丢弃，
-        // 替代"比较 CurrentPath 字符串"的临时方案，也不依赖任何时间阈值。
-        private long _sessionId;
-        private EventHandler<StoppedEventArgs> _stoppedHandler;   // 保存闭包引用以便退订
+        IWavePlayer _output;
+        SampleCaptureProvider _capture;      // 频谱采样（挂在混音器输出）
+        MixingSampleProvider _mixer;
+        readonly object _lock = new object();
 
-        /// <summary>当前播放会话 ID（每次 Load 递增；切歌竞态过滤的唯一依据）。</summary>
-        public long SessionId { get { return _sessionId; } }
+        readonly List<TrackInput> _inputs = new List<TrackInput>();  // 活跃输入
+        TrackInput _current;
+
+        long _sessionId;
+        string _currentPath;
+        bool _disposed;
+        bool _deviceStopping;                // 主动 Stop 时忽略设备 PlaybackStopped
+        float _desiredVolume = 1.0f;         // 主音量（WaveOut.Volume，持久保持）
+        float _rgLinear = 1f;                // ReplayGain 线性增益（新输入生效）
+
+        TrackInput _preloaded;               // 预热解码器（未入混音器）
+        string _preloadedPath;
+
+        /// <summary>当前播放会话 ID（每次 Load/CrossfadeTo 递增；切歌竞态过滤依据）。</summary>
+        public long SessionId { get { lock (_lock) { return _sessionId; } } }
 
         public event EventHandler<PlaybackStateChangedEventArgs> StateChanged;
         public event EventHandler<SpectrumDataEventArgs> SpectrumDataReady;
@@ -115,154 +143,356 @@ namespace Aurora
 
         public TimeSpan Position
         {
-            get { return _audioFile != null ? _audioFile.CurrentTime : TimeSpan.Zero; }
+            get { lock (_lock) { return _current != null && !_current.ReaderDisposed ? _current.Reader.CurrentTime : TimeSpan.Zero; } }
             set
             {
-                if (_audioFile == null) return;
-                // 快退键（←）在歌曲开头 5 秒内会算出负位置，MediaFoundationReader 对
-                // 负值直接抛 ArgumentOutOfRangeException（有全局钩子兜底不闪退，
-                // 但 seek 状态已乱）；越界统一钳制到 [0, Duration]
-                if (value < TimeSpan.Zero) value = TimeSpan.Zero;
-                if (_audioFile.TotalTime > TimeSpan.Zero && value > _audioFile.TotalTime)
-                    value = _audioFile.TotalTime;
-                _audioFile.CurrentTime = value;
+                lock (_lock)
+                {
+                    if (_current == null || _current.ReaderDisposed) return;
+                    // 越界钳制到 [0, Duration]（负值会让 MF 抛 ArgumentOutOfRangeException）
+                    if (value < TimeSpan.Zero) value = TimeSpan.Zero;
+                    if (_current.Reader.TotalTime > TimeSpan.Zero && value > _current.Reader.TotalTime)
+                        value = _current.Reader.TotalTime;
+                    _current.Reader.CurrentTime = value;
+                }
             }
         }
 
         public TimeSpan Duration
         {
-            get { return _audioFile != null ? _audioFile.TotalTime : TimeSpan.Zero; }
+            get { lock (_lock) { return _current != null && !_current.ReaderDisposed ? _current.Reader.TotalTime : TimeSpan.Zero; } }
         }
 
         public float Volume
         {
-            get { return _waveOut != null ? _waveOut.Volume : _desiredVolume; }
+            get { return _output != null ? _output.Volume : _desiredVolume; }
             set
             {
                 _desiredVolume = Math.Max(0f, Math.Min(1f, value));
-                if (_waveOut != null) _waveOut.Volume = _desiredVolume;
+                if (_output != null) _output.Volume = _desiredVolume;
             }
         }
 
-        public string CurrentPath { get { return _currentPath; } }
+        public string CurrentPath { get { lock (_lock) { return _currentPath; } } }
 
         public PlayerEngine()
         {
             State = PlaybackState.Stopped;
+            _mixer = new MixingSampleProvider(AudioDecoders.MixerFormat) { ReadFully = false };
+            _mixer.MixerInputEnded += OnMixerInputEnded;
+            _capture = new SampleCaptureProvider(_mixer);
+            _output = CreateOutput(_capture);
+            if (_output != null) _output.Volume = _desiredVolume;
         }
 
-        /// <summary>加载音频文件。</summary>
+        /// <summary>创建常驻输出设备；WASAPI 独占开启时优先尝试，失败回退 WaveOutEvent。</summary>
+        IWavePlayer CreateOutput(ISampleProvider source)
+        {
+            if (Settings.Get("wasapi_exclusive", "0") == "1")
+            {
+                try
+                {
+                    var device = new MMDeviceEnumerator().GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
+                    var wasapi = new WasapiOut(device, AudioClientShareMode.Exclusive, false, 150);
+                    wasapi.Init(source);
+                    MainViewModel.Dbg("Output: WASAPI Exclusive");
+                    return wasapi;
+                }
+                catch (Exception ex)
+                {
+                    MainViewModel.Dbg("WASAPI Exclusive init FAIL -> fallback WaveOutEvent: " + ex.Message);
+                }
+            }
+            var waveOut = new WaveOutEvent { DesiredLatency = 150, NumberOfBuffers = 4 };
+            waveOut.PlaybackStopped += OnDeviceStopped;
+            waveOut.Init(source);
+            return waveOut;
+        }
+
+        /* ============================================================
+         * 加载 / 播放控制
+         * ============================================================ */
+
+        /// <summary>加载音频文件（手动切歌：立即硬切，移除旧输入）。</summary>
         public bool Load(string path)
         {
-            try
+            lock (_lock)
             {
-                // 会话递增必须最先做：让旧会话在 Stop/Dispose 期间及之后产生的任何
-                // 异步事件（PlaybackStopped 等）都因 ID 不匹配而被丢弃
+                if (_disposed) return false;
                 _sessionId++;
-                long sessionId = _sessionId;
-                Stop();
-                DisposeWaveOut();
+                long session = _sessionId;
+                RemoveAllInputs();
 
                 if (!File.Exists(path)) return false;
+                TrackInput input = BuildInput(path, session);
+                if (input == null) return false;
 
-                string ext = Path.GetExtension(path).ToLowerInvariant();
-                bool isVorbis = ext == ".ogg" || ext == ".oga";
-                bool isOpus = ext == ".opus";
-
-                // OGG 使用 NVorbis 流式读取（VorbisWaveReader）。
-                // OPUS 使用 Concentus 纯托管解码（OpusWaveReader）：
-                // Media Foundation 不支持裸 .opus 字节流（0xC00D36C4），
-                // NVorbis 仅支持 Vorbis 编码，二者均不可用，必须自解码。
-                if (isVorbis)
-                    _audioFile = new VorbisWaveReader(path);
-                else if (isOpus)
-                    _audioFile = new OpusWaveReader(path);
-                else
-                    _audioFile = new AudioFileReader(path);
-
+                _current = input;
                 _currentPath = path;
-
-                // 样本抓取包装器：用于真实频谱（非系统环回）
-                // AudioFileReader 和 VorbisWaveReader 均实现 ISampleProvider
-                _capture = new SampleCaptureProvider(_audioFile as ISampleProvider);
-
-                _waveOut = new WaveOutEvent();
-                _waveOut.DesiredLatency = 100;
-                _waveOut.NumberOfBuffers = 3;
-                _waveOut.Volume = _desiredVolume;   // 恢复用户音量（新 WaveOut 默认 100%）
-                // 闭包捕获本会话 ID：该设备实例后续触发的 PlaybackStopped 都归属此会话，
-                // 若回调时 _sessionId 已变化（期间又 Load 了新歌），事件按过期丢弃
-                _stoppedHandler = (s, e) => OnPlaybackStopped(s, e, sessionId);
-                _waveOut.PlaybackStopped += _stoppedHandler;
-                _waveOut.Init(_capture);
-
                 State = PlaybackState.Stopped;
-                _isPlaying = false;
                 RaiseStateChanged();
-                Aurora.MainViewModel.Dbg("Load ok: " + path);
+                MainViewModel.Dbg("Load ok (mixer): " + path);
                 return true;
             }
-            catch (Exception ex)
+        }
+
+        /// <summary>跨淡切换：新输入淡入混入，当前输入淡出后移除（Crossfade 用）。</summary>
+        public bool CrossfadeTo(string path, double fadeSeconds)
+        {
+            lock (_lock)
             {
-                Aurora.MainViewModel.Dbg("Load FAIL: " + path + " -> " + ex.GetType().Name + ": " + ex.Message);
-                DisposeWaveOut();
-                return false;
+                if (_disposed) return false;
+                _sessionId++;
+                long session = _sessionId;
+
+                if (!File.Exists(path)) return false;
+                TrackInput input = BuildInput(path, session);
+                if (input == null) return false;
+
+                input.Gain.BeginFadeIn(fadeSeconds);
+                AddInput(input);
+
+                TrackInput old = _current;
+                _current = input;
+                _currentPath = path;
+                if (old != null)
+                    old.Gain.BeginFadeOut(0, fadeSeconds);
+                ScheduleOldInputRemoval(old, fadeSeconds);
+
+                if (State != PlaybackState.Playing)
+                {
+                    State = PlaybackState.Playing;
+                    try { if (_output != null) _output.Play(); } catch { }
+                }
+                RaiseStateChanged();
+                return true;
             }
+        }
+
+        /// <summary>把输入接入混音器（统一入口，维护 InMixer 标记）。</summary>
+        void AddInput(TrackInput input)
+        {
+            _mixer.AddMixerInput(input.Gain);
+            input.InMixer = true;
+            _inputs.Add(input);
         }
 
         public void Play()
         {
-            if (_disposed || _waveOut == null) return;
-            if (State != PlaybackState.Playing)
+            lock (_lock)
             {
-                _waveOut.Play();
-                State = PlaybackState.Playing;
-                _isPlaying = true;
-                _playStartTicks = DateTime.UtcNow.Ticks;
-                _fastStopRetries = 0;
-                RaiseStateChanged();
+                if (_disposed || _output == null) return;
+                if (State != PlaybackState.Playing)
+                {
+                    try { _output.Play(); } catch { }
+                    State = PlaybackState.Playing;
+                    RaiseStateChanged();
+                }
             }
         }
 
         public void Pause()
         {
-            if (_disposed || _waveOut == null) return;
-            if (State == PlaybackState.Playing)
+            lock (_lock)
             {
-                _waveOut.Pause();
-                State = PlaybackState.Paused;
-                _isPlaying = false;
-                RaiseStateChanged();
+                if (_disposed || _output == null) return;
+                if (State == PlaybackState.Playing)
+                {
+                    try { _output.Pause(); } catch { }
+                    State = PlaybackState.Paused;
+                    RaiseStateChanged();
+                }
             }
         }
 
         public void Stop()
         {
-            if (_disposed) return;
-            if (_waveOut != null)
+            lock (_lock)
             {
-                _isPlaying = false;
-                _waveOut.Stop();
+                if (_disposed) return;
+                _deviceStopping = true;   // 主动停止：忽略设备 PlaybackStopped
+                RemoveAllInputs();
+                try { if (_output != null) _output.Stop(); } catch { }
+                State = PlaybackState.Stopped;
+                RaiseStateChanged();
             }
-            if (_audioFile != null)
-            {
-                _audioFile.Position = 0;
-            }
-            State = PlaybackState.Stopped;
-            RaiseStateChanged();
         }
 
         public void Seek(TimeSpan position)
         {
-            if (_disposed || _audioFile == null) return;
-            _audioFile.CurrentTime = position;
+            Position = position;
             RaiseStateChanged();
+        }
+
+        /// <summary>设置 ReplayGain 线性增益（1=不变），对当前输入实时生效。</summary>
+        public void SetReplayGain(float linear)
+        {
+            lock (_lock)
+            {
+                _rgLinear = Math.Max(0f, Math.Min(8f, linear));
+                if (_current != null) _current.Gain.BaseGain = _rgLinear;
+            }
+        }
+
+        /// <summary>
+        /// 预加载解码器（后台线程打开，下一首 Load/CrossfadeTo 时零成本取用）。
+        /// 幂等：同一路径重复调用只打开一次。
+        /// </summary>
+        public void Preload(string path)
+        {
+            lock (_lock)
+            {
+                if (_disposed || string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+                if (_preloadedPath == path) return;
+                DisposePreloaded();
+                _preloadedPath = path;
+            }
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                WaveStream reader = null;
+                try { reader = AudioDecoders.Open(path); }
+                catch { reader = null; }
+                lock (_lock)
+                {
+                    if (_disposed) { try { if (reader != null) reader.Dispose(); } catch { } return; }
+                    if (_preloadedPath != path) { try { if (reader != null) reader.Dispose(); } catch { } return; }
+                    if (reader != null) _preloaded = new TrackInput { Path = path, Reader = reader };
+                }
+            });
+        }
+
+        /// <summary>取预载解码器（路径匹配才用，否则现开；不匹配的旧预载随手丢弃）。</summary>
+        WaveStream TakePreloaded(string path)
+        {
+            if (_preloaded != null && string.Equals(_preloadedPath, path, StringComparison.OrdinalIgnoreCase))
+            {
+                var reader = _preloaded.Reader;
+                _preloaded = null;
+                _preloadedPath = null;
+                return reader;
+            }
+            DisposePreloaded();
+            return null;
+        }
+
+        /// <summary>构建一条曲目输入：优先取预载解码器，否则现开；归一化 + 增益包络。</summary>
+        TrackInput BuildInput(string path, long session)
+        {
+            try
+            {
+                WaveStream reader = TakePreloaded(path) ?? AudioDecoders.Open(path);
+                ISampleProvider normalized = AudioDecoders.NormalizeToMixer(reader.ToSampleProvider());
+                var gain = new GainFadeSampleProvider(normalized) { BaseGain = _rgLinear };
+                return new TrackInput { SessionId = session, Path = path, Reader = reader, Gain = gain };
+            }
+            catch (Exception ex)
+            {
+                MainViewModel.Dbg("BuildInput FAIL: " + path + " -> " + ex.GetType().Name + ": " + ex.Message);
+                return null;
+            }
+        }
+
+        void DisposePreloaded()
+        {
+            if (_preloaded != null)
+            {
+                try { _preloaded.Reader.Dispose(); } catch { }
+                _preloaded = null;
+            }
+            _preloadedPath = null;
+        }
+
+        /// <summary>淡出完成后兜底移除旧输入（正常情况下其自然结束会先触发清理）。</summary>
+        void ScheduleOldInputRemoval(TrackInput old, double fadeSeconds)
+        {
+            if (old == null) return;
+            var timer = new System.Threading.Timer(_ =>
+            {
+                lock (_lock)
+                {
+                    if (_disposed) return;
+                    if (_current != old && _inputs.Contains(old))
+                        RemoveInput(old);
+                }
+            }, null, (int)(fadeSeconds * 1000) + 800, Timeout.Infinite);
+        }
+
+        void RemoveInput(TrackInput input)
+        {
+            if (_inputs.Remove(input))
+            {
+                if (input.InMixer)
+                {
+                    try { _mixer.RemoveMixerInput(input.Gain); } catch { }
+                    input.InMixer = false;
+                }
+                input.ReaderDisposed = true;
+                try { input.Reader.Dispose(); } catch { }
+            }
+        }
+
+        void RemoveAllInputs()
+        {
+            foreach (TrackInput input in _inputs)
+            {
+                if (input.InMixer)
+                {
+                    try { _mixer.RemoveMixerInput(input.Gain); } catch { }
+                    input.InMixer = false;
+                }
+                input.ReaderDisposed = true;
+                try { input.Reader.Dispose(); } catch { }
+            }
+            _inputs.Clear();
+            _current = null;
+        }
+
+        /* ============================================================
+         * 结束判定 / 设备事件
+         * ============================================================ */
+
+        /// <summary>曲目输入自然播完（混音器移除该输入时触发）→ 携带会话 ID 上报结束。</summary>
+        void OnMixerInputEnded(object sender, SampleProviderEventArgs e)
+        {
+            TrackInput input = null;
+            lock (_lock)
+            {
+                if (_disposed) return;
+                foreach (TrackInput t in _inputs)
+                {
+                    if (ReferenceEquals(t.Gain, e.SampleProvider)) { input = t; break; }
+                }
+                if (input != null)
+                {
+                    _inputs.Remove(input);
+                    input.ReaderDisposed = true;
+                    try { input.Reader.Dispose(); } catch { }
+                }
+                if (input != null && ReferenceEquals(input, _current))
+                {
+                    // 当前曲目自然播完：会话仍有效（未发生新的 Load/CrossfadeTo）
+                    _current = null;
+                    State = PlaybackState.Stopped;
+                    var handler = PlaybackEnded;
+                    if (handler != null)
+                        handler(this, new PlaybackEndedEventArgs { SessionId = input.SessionId, Path = input.Path });
+                    RaiseStateChanged();
+                }
+            }
+        }
+
+        /// <summary>设备级 PlaybackStopped：只在主动 Stop()/Dispose() 时发生，直接忽略。</summary>
+        void OnDeviceStopped(object sender, StoppedEventArgs e)
+        {
+            _deviceStopping = false;
+            // 自然结束走 OnMixerInputEnded；这里无需处理。
+            // （设备异常中断的场景由"播放无声"的用户感知 + 重启应用兜底，概率极低）
         }
 
         /// <summary>主动拉取当前频谱数据（由 UI 定时器调用，约 30fps）。</summary>
         public void PullSpectrum()
         {
-            if (_capture == null || _audioFile == null || State != PlaybackState.Playing) return;
+            if (_capture == null || _output == null || State != PlaybackState.Playing) return;
 
             float[] samples = _capture.GetLastSamples();
             if (samples == null || samples.Length == 0) return;
@@ -273,62 +503,13 @@ namespace Aurora
                 handler(this, new SpectrumDataEventArgs
                 {
                     Samples = samples,
-                    Channels = _audioFile.WaveFormat.Channels,
-                    SampleRate = _audioFile.WaveFormat.SampleRate
+                    Channels = _capture.WaveFormat.Channels,
+                    SampleRate = _capture.WaveFormat.SampleRate
                 });
             }
         }
 
-        private void OnPlaybackStopped(object sender, StoppedEventArgs e, long session)
-        {
-            // ===== 会话过滤（PlaybackSession）=====
-            // 该 stopped 事件来自 session 号对应的设备实例；若期间已 Load 新歌
-            //（_sessionId 变化），这是旧会话的过期事件，直接丢弃——无论其表现
-            // 像"自然播完"还是"设备中断"，都不允许触发切歌。
-            if (session != _sessionId || _disposed) return;
-
-            // 自然结束：_isPlaying 仍为 true（主动 Stop()/Pause() 会先置 false 再动作，
-            // 因此走到这里的 stopped 一定是播到末尾或设备中断，均按结束处理。
-            // 不能用 CurrentTime >= TotalTime 判定——MF 解码的 MP3 常停在比
-            // TotalTime 略小的位置（帧填充样本），精确比较会漏判导致不切歌。
-            Aurora.MainViewModel.Dbg("OnPlaybackStopped: session=" + session + " path=" + _currentPath + " isPlaying=" + _isPlaying);
-            if (_isPlaying)
-            {
-                // 快速停止防护：点击切歌时旧 WaveOut 正在活跃播放，Stop()+Dispose() 后
-                // 立即新建 WaveOut 播放（尤其 MediaFoundation 解码的 MP3），设备清理与新
-                // 实例竞争会导致播放线程瞬间异常退出，触发 PlaybackStopped——表现与
-                // "自然播完"完全相同（实测 Play 后 7ms 即 stopped）。若不防护，会被误判
-                // 为切歌条件，用户点击的歌被自动连播覆盖。
-                // 判据：Play() 后 300ms 内就 stopped 且位置仍在起点 → 重试播放而非切歌；
-                // 连续 3 次仍失败则放行（按结束处理，避免死循环）。
-                var sincePlay = TimeSpan.FromTicks(DateTime.UtcNow.Ticks - _playStartTicks);
-                if (sincePlay < TimeSpan.FromMilliseconds(300) &&
-                    Position < TimeSpan.FromMilliseconds(200) &&
-                    _fastStopRetries < 3)
-                {
-                    _fastStopRetries++;
-                    Aurora.MainViewModel.Dbg("PlaybackStopped too soon (" + sincePlay.TotalMilliseconds + "ms) -> retry #" + _fastStopRetries);
-                    try
-                    {
-                        _waveOut.Play();
-                        _playStartTicks = DateTime.UtcNow.Ticks;
-                        return;   // 保持 State=Playing / _isPlaying=true
-                    }
-                    catch (Exception ex)
-                    {
-                        Aurora.MainViewModel.Dbg("retry Play FAIL: " + ex.Message);
-                    }
-                }
-
-                _isPlaying = false;
-                State = PlaybackState.Stopped;
-                var handler = PlaybackEnded;
-                if (handler != null) handler(this, new PlaybackEndedEventArgs { SessionId = session, Path = _currentPath });
-                RaiseStateChanged();
-            }
-        }
-
-        private void RaiseStateChanged()
+        void RaiseStateChanged()
         {
             var handler = StateChanged;
             if (handler != null)
@@ -342,31 +523,17 @@ namespace Aurora
             }
         }
 
-        private void DisposeWaveOut()
-        {
-            if (_waveOut != null)
-            {
-                if (_stoppedHandler != null) _waveOut.PlaybackStopped -= _stoppedHandler;
-                _stoppedHandler = null;
-                _waveOut.Dispose();
-                _waveOut = null;
-            }
-            _capture = null;
-            if (_audioFile != null)
-            {
-                _audioFile.Dispose();
-                _audioFile = null;
-            }
-            _currentPath = null;
-        }
-
         public void Dispose()
         {
-            if (!_disposed)
+            lock (_lock)
             {
-                Stop();
-                DisposeWaveOut();
+                if (_disposed) return;
                 _disposed = true;
+                _deviceStopping = true;
+                RemoveAllInputs();
+                DisposePreloaded();
+                try { if (_output != null) _output.Dispose(); } catch { }
+                _output = null;
             }
         }
     }

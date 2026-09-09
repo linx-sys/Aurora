@@ -654,6 +654,7 @@ namespace Aurora
             if (current == t)
             {
                 if (refreshLyrics) Lyrics.Render(t);
+                ViewModel.PreloadNextIfNearEnd();   // P2：临结束预热下一首 / 到点跨淡切换
                 if (refreshCover) UpdateTrackInfo(t);
             }
 
