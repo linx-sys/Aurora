@@ -16,6 +16,9 @@ namespace Aurora
 {
     public class LibraryImportController
     {
+        /// <summary>共享媒体库缓存（SQLite；增量扫描指纹复用）。路径 %APPDATA%\AuroraPlayer\library.db。</summary>
+        public static readonly LibraryDatabase Db = new LibraryDatabase(LibraryDatabase.DefaultPath);
+
         readonly Window win;
         readonly MainViewModel vm;
         readonly Action<string> toast;
@@ -58,7 +61,9 @@ namespace Aurora
             {
                 var files = new List<string>();
                 Library.EnumerateFiles(d, files, 0);
-                List<Track> built = Library.BuildTracks(files);
+                // 增量扫描：指纹（大小+最后写入时间）命中 SQLite 缓存直接复用元数据，
+                // 未命中才解析标签并回写；同时清理目录下已消失文件的过期行
+                List<Track> built = Library.BuildTracksIncremental(files, Db, d);
                 win.Dispatcher.BeginInvoke((Action)(() =>
                 {
                     isLoadingDir = false;
@@ -105,7 +110,7 @@ namespace Aurora
                     }
                     catch { }
                 }
-                List<Track> built = Library.BuildTracks(files);
+                List<Track> built = Library.BuildTracksIncremental(files, Db, null);   // 追加导入：只 upsert 不清理
                 win.Dispatcher.BeginInvoke((Action)(() =>
                 {
                     int added = vm.Playlist.AddRange(built);   // 去重 + 单次批量刷新（唯一数据源）

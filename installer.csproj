@@ -39,6 +39,12 @@
     <EmbeddedResource Include="build\NAudio.Core.dll" LogicalName="Aurora.NAudio.Core.dll" />
     <EmbeddedResource Include="build\NAudio.WinMM.dll" LogicalName="Aurora.NAudio.WinMM.dll" />
     <EmbeddedResource Include="build\NAudio.Wasapi.dll" LogicalName="Aurora.NAudio.Wasapi.dll" />
+    <!-- SQLite（媒体库缓存，MIT）：含 win-x64 原生 e_sqlite3 -->
+    <EmbeddedResource Include="build\Microsoft.Data.Sqlite.dll" LogicalName="Aurora.Microsoft.Data.Sqlite.dll" />
+    <EmbeddedResource Include="build\SQLitePCLRaw.core.dll" LogicalName="Aurora.SQLitePCLRaw.core.dll" />
+    <EmbeddedResource Include="build\SQLitePCLRaw.provider.e_sqlite3.dll" LogicalName="Aurora.SQLitePCLRaw.provider.e_sqlite3.dll" />
+    <EmbeddedResource Include="build\SQLitePCLRaw.batteries_v2.dll" LogicalName="Aurora.SQLitePCLRaw.batteries_v2.dll" />
+    <EmbeddedResource Include="build\runtimes\win-x64\native\e_sqlite3.dll" LogicalName="Aurora.e_sqlite3.dll" />
     <EmbeddedResource Include="assets\icon256.png" LogicalName="Aurora.icon.png" />
   </ItemGroup>
 

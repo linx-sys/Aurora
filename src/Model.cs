@@ -120,8 +120,31 @@ namespace Aurora
             }
         }
 
-        /// <summary>从一批文件构建轨道（音频 + 同名 lrc 配对），后台线程调用。</summary>
+        /// <summary>文件指纹：大小 + 最后写入时间 UTC（增量扫描复用判定依据）。</summary>
+        public static void GetFingerprint(string path, out long bytes, out long lastModifiedUtcTicks)
+        {
+            bytes = 0; lastModifiedUtcTicks = 0;
+            try
+            {
+                var fi = new FileInfo(path);
+                bytes = fi.Length;
+                lastModifiedUtcTicks = fi.LastWriteTimeUtc.Ticks;
+            }
+            catch { }
+        }
+
+        /// <summary>从一批文件构建轨道（音频 + 同名 lrc 配对），后台线程调用。全量解析（无缓存）。</summary>
         public static List<Track> BuildTracks(IEnumerable<string> files)
+        {
+            return BuildTracksIncremental(files, null, null);
+        }
+
+        /// <summary>
+        /// 增量扫描构建轨道（P1）：db 非空时按指纹（大小+最后写入时间）命中缓存直接复用
+        /// 标签元数据，未命中才解析并回写 DB；cleanupDir 非空时清理该目录下已消失文件的过期行。
+        /// lrc 文本与外部封面兜底保持每次现读（联网匹配后会出现，不能缓存）。
+        /// </summary>
+        public static List<Track> BuildTracksIncremental(IEnumerable<string> files, LibraryDatabase db, string cleanupDir)
         {
             var lrcMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var audio = new List<string>();
@@ -133,15 +156,69 @@ namespace Aurora
             }
 
             var result = new List<Track>();
+            var toUpsert = new List<TrackRow>();
             foreach (string path in audio)
             {
-                try { result.Add(FromPath(path, lrcMap)); } catch { }
+                try { result.Add(BuildOne(path, lrcMap, db, toUpsert)); } catch { }
             }
             result.Sort((a, b) => string.Compare(a.FileName, b.FileName, StringComparison.CurrentCultureIgnoreCase));
+
+            if (db != null)
+            {
+                if (toUpsert.Count > 0) db.UpsertMany(toUpsert);
+                if (!string.IsNullOrEmpty(cleanupDir))
+                {
+                    var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (Track t in result) present.Add(t.FilePath);
+                    db.DeleteMissingUnder(cleanupDir, present);
+                }
+            }
             return result;
         }
 
+        /// <summary>构建单条轨道：缓存命中走 FromMetadata 复用，未命中解析并记入回写队列。</summary>
+        static Track BuildOne(string path, Dictionary<string, string> lrcMap, LibraryDatabase db, List<TrackRow> toUpsert)
+        {
+            Library.GetFingerprint(path, out long bytes, out long mtime);
+            TrackRow row = db != null ? db.TryGet(path) : null;
+            if (LibraryDatabase.FingerprintMatches(row, bytes, mtime))
+            {
+                // 缓存命中：跳过昂贵的标签解析（ID3/FLAC/M4A/封面）
+                return FromMetadata(path, row.Title, row.Artist, row.Album,
+                    TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, lrcMap);
+            }
+
+            TrackMetadata meta = TagReaderService.Read(path);
+            TimeSpan duration = meta.Duration ?? TimeSpan.Zero;
+            if (db != null)
+            {
+                toUpsert.Add(new TrackRow
+                {
+                    Path = path,
+                    FileName = Path.GetFileName(path),
+                    Title = meta.Title,
+                    Artist = meta.Artist,
+                    Album = meta.Album,
+                    DurationSeconds = duration.TotalSeconds,
+                    Bytes = bytes,
+                    LastModified = mtime,
+                    Cover = meta.Cover,
+                });
+            }
+            return FromMetadata(path, meta.Title, meta.Artist, meta.Album, duration, meta.Cover, lrcMap);
+        }
+
+        /// <summary>全量解析单文件并构建轨道（含 lrc 配对与外部封面兜底）。</summary>
         public static Track FromPath(string path, Dictionary<string, string> lrcMap)
+        {
+            TrackMetadata meta = TagReaderService.Read(path);
+            return FromMetadata(path, meta.Title, meta.Artist, meta.Album,
+                meta.Duration ?? TimeSpan.Zero, meta.Cover, lrcMap);
+        }
+
+        /// <summary>由元数据（解析所得或缓存复用）构建轨道；lrc 与外部封面兜底每次现读。</summary>
+        public static Track FromMetadata(string path, string title, string artist, string album,
+            TimeSpan duration, byte[] tagCover, Dictionary<string, string> lrcMap)
         {
             var t = new Track
             {
@@ -150,15 +227,28 @@ namespace Aurora
             };
             try { t.Bytes = new FileInfo(path).Length; } catch { }
 
-            // 统一标签读取服务（封装 MP3/FLAC/M4A/OGG/OPUS/WAV 解析 + 文件名推断 + 垃圾标签清除）
-            TrackMetadata meta = TagReaderService.Read(path);
-            t.Title = meta.Title;
-            t.Artist = meta.Artist;
-            t.Album = meta.Album;
-            if (meta.Cover != null) t.Cover = meta.Cover;
-            if (meta.Duration.HasValue) t.Duration = meta.Duration.Value;
+            t.Title = title;
+            t.Artist = artist;
+            t.Album = album;
+            if (tagCover != null && tagCover.Length > 0) t.Cover = tagCover;
+            if (duration > TimeSpan.Zero) t.Duration = duration;
             string ext = Path.GetExtension(path).ToLowerInvariant();
 
+            ApplyLrc(t, lrcMap);
+
+            if (t.Artist == null) t.Artist = "";
+            if (t.Album == null) t.Album = "";
+
+            // 外部封面兜底：缓存目录优先，同目录 .jpg 向后兼容
+            ApplyExternalCoverFallback(t);
+            return t;
+        }
+
+        /// <summary>歌词文件定位与读取：联网匹配缓存优先 → 同名 lrc → xxx.mp3.lrc。</summary>
+        static void ApplyLrc(Track t, Dictionary<string, string> lrcMap)
+        {
+            string path = t.FilePath;
+            string ext = Path.GetExtension(path).ToLowerInvariant();
             string lrc = NetMatch.FindLyricFile(path);
             if (lrc == null && lrcMap != null)
                 lrcMap.TryGetValue(Path.GetFileNameWithoutExtension(path), out lrc);
@@ -171,23 +261,20 @@ namespace Aurora
             {
                 try { t.LrcText = Id3.DecodeLoose(File.ReadAllBytes(lrc)); } catch { }
             }
+        }
 
-            if (t.Artist == null) t.Artist = "";
-            if (t.Album == null) t.Album = "";
-
-            // 外部封面兜底：缓存目录优先，同目录 .jpg 向后兼容
+        /// <summary>无内嵌封面时：联网匹配封面缓存 → 同目录同名 .jpg。</summary>
+        static void ApplyExternalCoverFallback(Track t)
+        {
+            if (t.Cover != null && t.Cover.Length > 0) return;
+            string cached = NetMatch.GetCoverCachePath(t.FilePath);
+            if (File.Exists(cached))
+                try { t.Cover = File.ReadAllBytes(cached); } catch { }
             if (t.Cover == null || t.Cover.Length == 0)
             {
-                string cached = NetMatch.GetCoverCachePath(path);
-                if (File.Exists(cached))
-                    try { t.Cover = File.ReadAllBytes(cached); } catch { }
-            }
-            if (t.Cover == null || t.Cover.Length == 0)
-            {
-                string jpg = Path.ChangeExtension(path, ".jpg");
+                string jpg = Path.ChangeExtension(t.FilePath, ".jpg");
                 try { if (File.Exists(jpg)) t.Cover = File.ReadAllBytes(jpg); } catch { }
             }
-            return t;
         }
     }
 

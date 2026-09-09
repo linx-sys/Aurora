@@ -184,6 +184,12 @@ namespace Aurora
             EmitResource("Aurora.NAudio.Core.dll", Path.Combine(dir, "NAudio.Core.dll"));
             EmitResource("Aurora.NAudio.WinMM.dll", Path.Combine(dir, "NAudio.WinMM.dll"));
             EmitResource("Aurora.NAudio.Wasapi.dll", Path.Combine(dir, "NAudio.Wasapi.dll"));
+            // SQLite（媒体库缓存，MIT）：原生 e_sqlite3 释放到应用根目录供 SQLitePCLRaw 探测
+            EmitResource("Aurora.Microsoft.Data.Sqlite.dll", Path.Combine(dir, "Microsoft.Data.Sqlite.dll"));
+            EmitResource("Aurora.SQLitePCLRaw.core.dll", Path.Combine(dir, "SQLitePCLRaw.core.dll"));
+            EmitResource("Aurora.SQLitePCLRaw.provider.e_sqlite3.dll", Path.Combine(dir, "SQLitePCLRaw.provider.e_sqlite3.dll"));
+            EmitResource("Aurora.SQLitePCLRaw.batteries_v2.dll", Path.Combine(dir, "SQLitePCLRaw.batteries_v2.dll"));
+            EmitResource("Aurora.e_sqlite3.dll", Path.Combine(dir, "e_sqlite3.dll"));
 
             if (progress != null) progress(60, "正在写入注册表…");
             using (var k = Registry.CurrentUser.CreateSubKey(string.Join(

@@ -50,6 +50,7 @@
     <Compile Include="src\PlaybackController.cs" />
     <Compile Include="src\PlaylistManager.cs" />
     <Compile Include="src\PlaylistViewController.cs" />
+    <Compile Include="src\LibraryDatabase.cs" />
     <Compile Include="src\LibraryImportController.cs" />
     <Compile Include="src\SingleInstanceServer.cs" />
     <Compile Include="src\WindowChromeController.cs" />
@@ -60,6 +61,8 @@
     <PackageReference Include="NAudio" Version="2.2.1" />
     <!-- NVorbis 0.10.4 (MIT) - OGG 纯托管解码 -->
     <PackageReference Include="NVorbis" Version="0.10.4" />
+    <!-- Microsoft.Data.Sqlite 10.0.12 (MIT) - 媒体库缓存（增量扫描指纹复用） -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
 
   <ItemGroup>
