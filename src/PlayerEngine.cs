@@ -226,6 +226,7 @@ namespace Aurora
                 if (!File.Exists(path)) return false;
                 TrackInput input = BuildInput(path, session);
                 if (input == null) return false;
+                AddInput(input);   // 关键：接入混音器（缺失会导致 mixer 无输入→永久静音、进度不动）
 
                 _current = input;
                 _currentPath = path;
