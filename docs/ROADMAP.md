@@ -1,0 +1,159 @@
+# Aurora 下一阶段开发路线图（v2.x → 3.0）
+
+> 2026-09-10 依据代码现状（commit `b55a89f`，五项改进已合入）逐阶段核对修订。
+> 图例：✅ 已达成 ｜ 🟡 部分达成（列差距）｜ ⬜ 未开始
+>
+> **与原稿的关键差异**：原稿假设"SQLite 仅作缓存、引擎零测试、MainWindow 900 行"，
+> 其中相当一部分已在 2026-09-09 的 P0/P1/P2 改进中解决。本文档是据实修订后的剩余工作清单。
+
+## 基线快照（2026-09-10 实测）
+
+| 指标 | 现状 | 3.0 目标 |
+| --- | --- | --- |
+| MainWindow | 509 行 / 24.9KB | < 300 行 |
+| PlayerEngine | 586 行 / 22.4KB | < 500 行 |
+| MainViewModel | 553 行 | 仅 UI 状态 |
+| 测试 | 191（引擎 12） | 300+（引擎 50+） |
+| 启动 | DB 秒开已实现，未量化 | < 500ms（待基线） |
+| Nullable | disable（30 处 Dbg 调用点） | enable 无警告 |
+| 发布 | CI 打 tag 自动 Build+Test+Release | + CHANGELOG / symbols |
+
+---
+
+## 阶段 0：代码冻结与基线建立 🟡（进行中，develop 分支）
+
+- ✅ 打 tag `v2.0-stable`（= b55a89f）并推送
+- ✅ 建 `develop` 分支并推送（阶段产物在此分支提交）
+- 🟡 架构文档：ARCHITECTURE.md 已有；✅ 新增 AUDIO_PIPELINE.md / DATABASE.md / DEVELOPMENT.md / PERF_BASELINE.md / ROADMAP.md
+- 🟡 性能基线：数据层已自动化（PerformanceBaselineTests，Release 实测：秒开物化 1000 首 1.41s、差分同步 1000 首 1.14s、GetByPrefix 10k 39ms）；**发现热点**：逐文件探测导致超大库秒开不达标（见 PERF_BASELINE.md 优化方案）；GUI 启动/内存/CPU 占位待手动测量
+
+**完成标准**：当前版本可随时回滚；所有后续修改有量化参照。
+
+## 阶段 1：开启 Nullable Reference Types ⬜（P0）
+
+- `<Nullable>disable</Nullable>` → `enable`（AuroraPlayer.csproj / tests 同步）
+- 修复重点：PlayerEngine（`_output?`/`_current?`/`_preloaded?`）、MainViewModel（`CurrentTrack?`）、LibraryImportController、各 Controller
+- 风险低（编译期问题），但改动面广，建议单独一批提交
+- **完成标准**：零 Nullable 警告；`!` 抑制符 ≤ 个位数
+
+## 阶段 2：MainWindow 二次精简 🟡（500 → <300 行）
+
+已完成（909 → 509 行）：Toast / 33ms 计时器（PlaybackTickController）/ 快捷键（HotkeyController）/ 联网匹配 / 窗口杂项 / UiUtil。
+
+剩余可拆（按收益排序）：
+- ⬜ 播放状态 UI 块（SetPlaying / UpdateTrackInfo / ApplyVolumeUi / ShowVolumePopup，约 120 行）→ `PlaybackStateViewController`
+- ⬜ OnCurrentTrackChanged 编排（约 55 行）→ 并入上述控制器
+- ⬜ HookEvents 剩余薄委托（按钮/音量条/拖放/窗口拖动，约 90 行）→ `CommandBindingManager`（原稿命名）
+- ⬜ DragDrop 迁入独立 Manager（当前 15 行，低优先）
+
+原稿新增的 `src/UI/Window/` 目录结构：**与项目"src/ 扁平"惯例冲突**，建议维持扁平命名（XxxController.cs），不建子目录。
+
+**完成标准**：MainWindow 只剩 Initialize / Constructor / Lifecycle；无播放逻辑 / 数据查询 / 文件扫描。
+
+## 阶段 3：MainViewModel 解耦（PlaybackCoordinator）🟡（P0）
+
+已完成：`IPlaybackService` 接口隔离引擎（VM 已不直接引用 PlayerEngine 具体类型）。
+
+剩余（原稿核心诉求仍然成立）：
+- ⬜ 新增 `PlaybackCoordinator`：把 PlayTrack / NextTrack(manual) / PrevTrack / PreloadNextIfNearEnd / CrossfadeToTrack / ApplyReplayGain / ScheduleLoudnessScan / OnPlaybackEnded 会话过滤（约 250 行）从 MainViewModel 迁出
+- ⬜ MainViewModel 收敛为：可观察 UI 状态 + 命令转发 + CurrentTrackChanged 事件源
+- ⬜ RG 懒分析调度随 Coordinator 走（依赖 ILibraryStore）
+
+**完成标准**：VM 不含播放流程判断 / 自动下一首 / Crossfade 决策；173+ 既有纯逻辑测试不破。
+
+## 阶段 4：PlayerEngine 再拆分 🟡（P1，586 → <500 行）
+
+已完成：`IAudioOutput` + WaveOut/Wasapi 适配器（即原稿 OutputManager 雏形，已独立文件）。
+
+剩余拆分（均为纯搬运，风险低）：
+- ⬜ `SpectrumCapture.cs`：SampleCaptureProvider + PullSpectrum（约 90 行）迁出
+- ⬜ `TrackInputManager.cs`：TrackInput 类 + BuildInput/RemoveInput/Preload/TakePreloaded（约 150 行）迁出
+- ⬜ PlaybackPipeline（Decoder→Normalize→GainFade 装配线）随 TrackInputManager 一并成文
+
+**完成标准**：PlayerEngine 协调层 < 500 行；191 测试不破（迁移后 namespace 不变即可）。
+
+## 阶段 5：Library 数据模型升级 ✅（核心）/ 🟡（扩展）
+
+**原稿主要诉求已达成**（P1-3，2026-09-09）：
+- ✅ SQLite 为正式核心存储（ILibraryStore，WAL）
+- ✅ 启动流程"SQLite 立即显示 → 后台扫描差分 → 更新库"（LibraryImportController 两段式）
+- ✅ 增量扫描（LibraryScanner 语义 = Library.BuildTracksIncremental：指纹命中跳过/变化重解析/消失清理）
+
+剩余（按需推进，非必需）：
+- ⬜ 扩展列：Genre / Bitrate / SampleRate（TagReaderService 已有部分数据，加列+迁移即可）
+- ⬜ 新表：artists / albums / playlists / playlist_tracks / history / favorites —— **属产品功能**，建议待播放队列/收藏功能立项时一并设计，勿提前建空表
+- ⬜ Hash 列：当前指纹 = 大小+mtime，够用；content hash 成本高，无现实问题不建议加
+- ⬜ 10 万曲库启动 <2s：需先有阶段 0 基线与合成大库再验证（BuildTracksFromRows 已按 O(n) 物化，预估可达成）
+
+## 阶段 6：Audio Engine 自动化测试 🟡（P0，12 → 50+）
+
+已完成（P1-4，fake IAudioOutput 无声卡可跑）：
+- ✅ 播放/暂停状态机、Seek 钳制（负值/超时长）、解码失败、音量钳制
+- ✅ 自然结束 → PlaybackEnded 携会话 ID、过期会话丢弃（VM 侧防线）、跨淡参数
+- ✅ Load 会话递增
+
+剩余补测清单：
+- ⬜ 快速切歌竞态：Play(A) → 50ms → Play(B) → 50ms → Play(C)，断言 Current==C（会话单调）
+- ⬜ 跨淡中旧输入淡出后移除（ScheduleOldInputRemoval 计时路径）
+- ⬜ Preload 命中/失效（同路径幂等、路径变更丢弃旧预载）
+- ⬜ ReplayGain 钳制（BaseGain 0~8 边界）、GainFade 与引擎联动
+- ⬜ Stop 后 Dispose 幂等、Dispose 后调用全部 no-op
+- ⬜ WASAPI 回退：factory 抛异常时默认工厂行为（需 Settings 注入点或工厂级测试）
+- ⬜ Position 拉取与 Reader 释放竞态（ReaderDisposed 标记路径）
+
+**完成标准**：引擎测试 50+；全部 CI 无声卡通过。
+
+## 阶段 7：Audio Diagnostics 面板 ⬜（P2，实现成本低、回报高）
+
+数据源已齐备，无需新管线：
+- 格式 = 扩展名；采样率/位深/声道 = `_current.Reader.WaveFormat`
+- ReplayGain = DB `track_gain`；Crossfade = 设置 `crossfade`；输出 = `wasapi_exclusive` 设置 + 实际回退结果（EnsureOutput 时记录 Dbg）
+- 入口：设置对话框加"音频诊断"按钮 → 只读文本展示（复用 NetMatchSettingsDialog 风格）
+
+## 阶段 8：日志系统统一 🟡（P2）
+
+现状：Logger 已有轮转 + 三路崩溃钩子；但 30 处 `MainViewModel.Dbg` 散落、无分级开关。
+- ⬜ `ILogger`（Debug/File/Null 三实现）+ 按模块分类（Player / Decoder / Device / NetMatch / Library）
+- ⬜ 迁移 Dbg 调用点（机械替换）；设置里加日志级别
+- ⬜ 导出入口（诊断面板内"打开日志文件夹"已有路径约定 `%LOCALAPPDATA%\Aurora\Logs\`）
+
+## 阶段 9：Provider 系统统一 🟡（P2）
+
+现状：`ILyricsProvider` 已存在、NetMatch 内置酷狗→网易云降级链 + 按格式开关。
+- ⬜ `IOnlineProvider` 统一歌词/封面/Metadata 三类；`ProviderRegistry`（优先级/启停/回退）
+- ⚠️ 收益主要是"未来接第三方源"；当前双源降级已稳定，**建议排在测试与诊断之后**
+
+## 阶段 10：产品体验优化 🟡（持续）
+
+- ✅ 启动：DB 秒开 + 设备后台预热已落地（量化待阶段 0 基线）
+- ✅ 搜索：200ms 防抖已落地（10 万曲毫秒级待大库验证）
+- ⬜ 首次启动引导 / 设置页整理 / 快捷键说明（README 已有快捷键表）
+- ⬜ README 截图（原 TODO 仍在）
+
+## 阶段 11：发布体系升级 🟡
+
+- ✅ CI：tag → Build → Test → Release（三产物：Setup / Portable / win64.zip）已自动化
+- ⬜ CHANGELOG.md 自动生成（release notes 已在用 `generate_release_notes: true`，差本地 CHANGELOG 落盘）
+- ⬜ symbols.zip（pdb 打包）；产物改名 Aurora-x64-Setup.exe（可选）
+
+---
+
+## 关于"最终目标架构"（多项目拆分）的决策建议
+
+原稿提出拆 Aurora.App / Core / Audio / Library / Infrastructure / Application 六工程。**与本项目一贯的"src/ 扁平单工程极简"风格冲突**（40+ 源文件全在一个 csproj，csproj 手工管理编译项）。替代方案：
+
+- **保持单工程**，用命名空间分区（Aurora.Audio / Aurora.Library / Aurora.Application）+ 文件头职责注释表达分层，依赖方向靠阶段 3/4 的接口边界保证
+- 多工程拆分仅在"开始接第三方扩展/插件"时再考虑
+
+**此项需拍板，默认按单工程推进。**
+
+## 推荐实施顺序（修订后）
+
+1. 阶段 0：tag + develop 分支 + 性能基线（半天）
+2. 阶段 6 补强：快速切歌竞态等引擎测试（~30 例）
+3. 阶段 3：PlaybackCoordinator（P0 核心）
+4. 阶段 2 收尾：MainWindow < 300 行
+5. 阶段 1：Nullable enable（单独一批）
+6. 阶段 4：PlayerEngine 拆分收尾
+7. 阶段 7 + 8：诊断面板 + 日志统一（一批）
+8. 阶段 9 / 10 / 11 按需
