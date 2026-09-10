@@ -19,11 +19,13 @@ namespace Aurora
         readonly Action<Track> updateTrackInfo;
         readonly Action<string> toast;
         readonly Func<bool> isDark;
+        readonly Func<string> audioDiagnostics;   // 音频诊断文本提供器（阶段 7；可为 null）
 
         readonly HashSet<string> netMatchFailed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         public NetMatchViewController(Window win, MainViewModel vm, LyricsViewController lyrics,
-            Action<Track> updateTrackInfo, Action<string> toast, Func<bool> isDark)
+            Action<Track> updateTrackInfo, Action<string> toast, Func<bool> isDark,
+            Func<string> audioDiagnostics = null)
         {
             this.win = win;
             this.vm = vm;
@@ -31,6 +33,7 @@ namespace Aurora
             this.updateTrackInfo = updateTrackInfo;
             this.toast = toast;
             this.isDark = isDark;
+            this.audioDiagnostics = audioDiagnostics;
         }
 
         public void TryNetMatch(Track t)
@@ -93,7 +96,8 @@ namespace Aurora
         /// <summary>联网匹配设置对话框（清缓存时同步清本会话失败重试表）。</summary>
         public void ShowSettings()
         {
-            NetMatchSettingsDialog.Show(win, isDark(), onCacheCleared: netMatchFailed.Clear, toast: toast);
+            NetMatchSettingsDialog.Show(win, isDark(), onCacheCleared: netMatchFailed.Clear, toast: toast,
+                audioDiagnostics: audioDiagnostics);
         }
     }
 }

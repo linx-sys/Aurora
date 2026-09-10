@@ -20,8 +20,10 @@ namespace Aurora
         /// 显示联网匹配设置对话框。
         /// onCacheCleared：用户清除缓存后回调（MainWindow 借此清空本次会话的失败标记）。
         /// toast：提示回调。
+        /// audioDiagnostics：音频诊断文本提供器（非 null 时显示"音频诊断"按钮，阶段 7）。
         /// </summary>
-        public static void Show(Window owner, bool dark, Action onCacheCleared, Action<string> toast)
+        public static void Show(Window owner, bool dark, Action onCacheCleared, Action<string> toast,
+            Func<string> audioDiagnostics = null)
         {
             var panelBg = new SolidColorBrush(dark ? Color.FromRgb(0x10, 0x13, 0x1B) : Color.FromRgb(0xFB, 0xFC, 0xFE));
             var textBrush = new SolidColorBrush(dark ? Color.FromRgb(0xE9, 0xED, 0xF6) : Color.FromRgb(0x1A, 0x20, 0x30));
@@ -163,6 +165,21 @@ namespace Aurora
             cacheRow.Children.Add(clearBtn);
             cacheRow.Children.Add(cacheText);
             root.Children.Add(cacheRow);
+
+            // 音频诊断入口（阶段 7）：查看当前解码格式/输出设备/增益等链路快照
+            if (audioDiagnostics != null)
+            {
+                var diagBtn = new Button
+                {
+                    Content = "音频诊断…",
+                    Padding = new Thickness(12, 5, 12, 5),
+                    HorizontalAlignment = HorizontalAlignment.Left,
+                    Margin = new Thickness(0, 10, 0, 0),
+                    Cursor = System.Windows.Input.Cursors.Hand,
+                };
+                diagBtn.Click += (s, e) => AudioDiagnosticsDialog.Show(dlg, dark, audioDiagnostics());
+                root.Children.Add(diagBtn);
+            }
 
             var doneBtn = new Button
             {

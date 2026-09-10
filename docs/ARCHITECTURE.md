@@ -50,10 +50,12 @@
 │  • PlaylistManager   Tracks/View 双集合 + 批量刷新  │
 ├────────────────────────────────────────────────────┤
 │ Service 层                                          │
-│  • PlayerEngine   IPlaybackService 唯一实现：常驻   │
-│                    混音器引擎；输出设备经            │
-│                    IAudioOutput 工厂注入（生产 =    │
-│                    WaveOut/WASAPI，测试 = fake）    │
+│  • PlayerEngine   IPlaybackService 唯一实现（协调层：│
+│                    状态机/会话 ID/设备生命周期/诊断） │
+│  • SpectrumCapture.cs    SampleCaptureProvider 频谱  │
+│  • TrackInputManager.cs  输入集合/预载/淡出移除管理   │
+│  • WaveOutAudioOutput / WasapiAudioOutput（IAudioOutput│
+│                    实现，OutputManager 职责）         │
 │  • AudioDecoders  解码器工厂 + 混音格式归一化        │
 │  • Loudness       ReplayGain 2.0 / EBU R128 分析    │
 │  • TagReaderService 统一标签读取（9 格式 + 文件名   │

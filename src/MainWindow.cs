@@ -25,6 +25,7 @@ namespace Aurora
         public Window Win;
         Grid root;
         IPlaybackService Player;
+        PlayerEngine Engine;                     // 具体引擎引用（诊断文本等引擎级能力）
         MainViewModel ViewModel;
 
         // ===== 装配出的控制器（View 行为全部下沉） =====
@@ -126,7 +127,8 @@ namespace Aurora
         void FindControls()
         {
             ILibraryStore library = new LibraryDatabase(LibraryDatabase.DefaultPath);
-            Player = new PlayerEngine();
+            Engine = new PlayerEngine();
+            Player = Engine;
             ViewModel = new MainViewModel(Player, library);
             Win.DataContext = ViewModel;
 
@@ -154,7 +156,8 @@ namespace Aurora
 
             NetMatchView = new NetMatchViewController(Win, ViewModel, Lyrics,
                 updateTrackInfo: t => StateView.UpdateTrackInfo(t),
-                toast: Toast, isDark: () => Theme.IsDark);
+                toast: Toast, isDark: () => Theme.IsDark,
+                audioDiagnostics: () => Engine.GetDiagnostics());
 
             Misc = new WindowMiscController(Win, ViewModel, Importer, Toast);
             Misc.SetWinIcons(F<WPath>("IcoMax"), F<WPath>("IcoRestore"));

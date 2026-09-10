@@ -1,26 +1,20 @@
 /* ============================================================
- * PlayerEngine.cs — 音频播放引擎（P2 管线重构）
+ * PlayerEngine.cs — 音频播放引擎（协调层，阶段 4 拆分后）
  *
  * 架构：常驻输出设备
- *   WaveOutEvent（或 WASAPI Exclusive）
- *     ← SampleCaptureProvider（频谱采样，混音器输出）
+ *   WaveOutEvent（或 WASAPI Exclusive，IAudioOutput 抽象）
+ *     ← SampleCaptureProvider（频谱采样，SpectrumCapture.cs）
  *     ← MixingSampleProvider（48kHz 立体声 float，ReadFully=false）
  *        ← 每曲目输入：解码器 → 格式归一化 → GainFadeSampleProvider
+ *          （输入集合/预载/淡出移除管理在 TrackInputManager.cs）
  *
- * 关键收益：
- * 1. 设备只建一次 → 切歌不再重建 WaveOut，"PlaybackStopped 竞态"的
- *    根因消失（原 300ms/200ms/retry×3 经验阈值 workaround 删除）；
- * 2. 曲目自然结束由 MixerInputEnded 判定并携带会话 ID，过期事件丢弃；
- * 3. 预加载下一首解码器（Preload）+ CrossfadeTo 跨淡切换 → 无缝衔接；
- * 4. ReplayGain 增益作用于每输入（SetReplayGain）。
+ * 本类职责：状态机与会话 ID、输出设备生命周期、ReplayGain 应用、
+ *           自然结束上报、诊断信息。不含输入集合管理与预载细节。
  * ============================================================ */
 using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Threading;
+using System.Text;
 using NAudio.Wave;
-using NAudio.CoreAudioApi;
-using NAudio.Wave.SampleProviders;
 using NAudio.Wave.SampleProviders;
 
 namespace Aurora
@@ -52,89 +46,27 @@ namespace Aurora
     }
 
     /// <summary>
-    /// 样本抓取包装器：在播放链中插入，复制 PCM 数据给频谱模块。
-    /// 实现 ISampleProvider，不干扰播放线程。挂在混音器输出（48k stereo）。
-    /// </summary>
-    internal class SampleCaptureProvider : ISampleProvider
-    {
-        private readonly ISampleProvider _source;
-        private float[] _lastBuffer;
-        private int _lastCount;
-        private readonly object _lock = new object();
-
-        public WaveFormat WaveFormat { get { return _source.WaveFormat; } }
-
-        public SampleCaptureProvider(ISampleProvider source)
-        {
-            _source = source;
-        }
-
-        public int Read(float[] buffer, int offset, int count)
-        {
-            int read = _source.Read(buffer, offset, count);
-            if (read > 0)
-            {
-                lock (_lock)
-                {
-                    if (_lastBuffer == null || _lastBuffer.Length < read)
-                        _lastBuffer = new float[read];
-                    Array.Copy(buffer, offset, _lastBuffer, 0, read);
-                    _lastCount = read;
-                }
-            }
-            return read;
-        }
-
-        /// <summary>获取最近一帧的样本数据（线程安全复制）。</summary>
-        public float[] GetLastSamples()
-        {
-            lock (_lock)
-            {
-                if (_lastCount <= 0) return null;
-                float[] result = new float[_lastCount];
-                Array.Copy(_lastBuffer, result, _lastCount);
-                return result;
-            }
-        }
-    }
-
-    /// <summary>
-    /// 音频播放引擎。常驻混音器架构，支持预加载、跨淡切换与 ReplayGain。
-    /// IPlaybackService 的唯一实现；UI/VM 层仅经接口交互。
+    /// 音频播放引擎（IPlaybackService 唯一实现，协调层）。
+    /// 频谱采样在 SpectrumCapture.cs、曲目输入/预载管理在 TrackInputManager.cs。
     /// </summary>
     public class PlayerEngine : IPlaybackService
     {
-        /// <summary>混音器中的一条曲目输入。</summary>
-        class TrackInput
-        {
-            public long SessionId;
-            public string Path;
-            public WaveStream Reader;            // 源格式（Position/TotalTime）
-            public GainFadeSampleProvider Gain;  // 归一化后的混音器输入
-            public bool InMixer;
-            public bool ReaderDisposed;          // Reader 已释放（防 ObjectDisposedException）
-        }
-
         IAudioOutput _output;
         readonly Func<ISampleProvider, IAudioOutput> _outputFactory;   // P1-4：输出设备工厂（测试注入 fake）
         readonly Func<string, WaveStream> _decoder;                    // P1-4：解码入口（测试注入 fake）
         SampleCaptureProvider _capture;      // 频谱采样（挂在混音器输出）
         MixingSampleProvider _mixer;
+        TrackInputManager _inputs;           // 曲目输入/预载管理（阶段 4 拆分）
         readonly object _lock = new object();
-
-        readonly List<TrackInput> _inputs = new List<TrackInput>();  // 活跃输入
-        TrackInput _current;
 
         long _sessionId;
         string _currentPath;
         bool _disposed;
         bool _deviceStopping;                // 主动 Stop 时忽略设备 PlaybackStopped
         bool _outputFailed;                  // 设备初始化失败（不再重试，播放静默降级）
+        string _outputDescription = "未初始化";   // 诊断用（阶段 7）
         float _desiredVolume = 1.0f;         // 主音量（WaveOut.Volume，持久保持）
         float _rgLinear = 1f;                // ReplayGain 线性增益（新输入生效）
-
-        TrackInput _preloaded;               // 预热解码器（未入混音器）
-        string _preloadedPath;
 
         /// <summary>当前播放会话 ID（每次 Load/CrossfadeTo 递增；切歌竞态过滤依据）。</summary>
         public long SessionId { get { lock (_lock) { return _sessionId; } } }
@@ -145,26 +77,43 @@ namespace Aurora
 
         public PlaybackState State { get; private set; }
 
+        TrackInput CurrentInput { get { return _inputs.Current; } }
+
         public TimeSpan Position
         {
-            get { lock (_lock) { return _current != null && !_current.ReaderDisposed ? _current.Reader.CurrentTime : TimeSpan.Zero; } }
+            get
+            {
+                lock (_lock)
+                {
+                    TrackInput cur = CurrentInput;
+                    return cur != null && !cur.ReaderDisposed ? cur.Reader.CurrentTime : TimeSpan.Zero;
+                }
+            }
             set
             {
                 lock (_lock)
                 {
-                    if (_current == null || _current.ReaderDisposed) return;
+                    TrackInput cur = CurrentInput;
+                    if (cur == null || cur.ReaderDisposed) return;
                     // 越界钳制到 [0, Duration]（负值会让 MF 抛 ArgumentOutOfRangeException）
                     if (value < TimeSpan.Zero) value = TimeSpan.Zero;
-                    if (_current.Reader.TotalTime > TimeSpan.Zero && value > _current.Reader.TotalTime)
-                        value = _current.Reader.TotalTime;
-                    _current.Reader.CurrentTime = value;
+                    if (cur.Reader.TotalTime > TimeSpan.Zero && value > cur.Reader.TotalTime)
+                        value = cur.Reader.TotalTime;
+                    cur.Reader.CurrentTime = value;
                 }
             }
         }
 
         public TimeSpan Duration
         {
-            get { lock (_lock) { return _current != null && !_current.ReaderDisposed ? _current.Reader.TotalTime : TimeSpan.Zero; } }
+            get
+            {
+                lock (_lock)
+                {
+                    TrackInput cur = CurrentInput;
+                    return cur != null && !cur.ReaderDisposed ? cur.Reader.TotalTime : TimeSpan.Zero;
+                }
+            }
         }
 
         public float Volume
@@ -194,6 +143,7 @@ namespace Aurora
             _decoder = decoder ?? AudioDecoders.Open;
             _mixer = new MixingSampleProvider(AudioDecoders.MixerFormat) { ReadFully = false };
             _mixer.MixerInputEnded += OnMixerInputEnded;
+            _inputs = new TrackInputManager(_mixer, _decoder, _lock);
             _capture = new SampleCaptureProvider(_mixer);
             if (outputFactory != null)
             {
@@ -220,17 +170,27 @@ namespace Aurora
                 {
                     _output.Volume = _desiredVolume;
                     _output.PlaybackStopped += OnDeviceStopped;
+                    _outputDescription = DescribeOutput(_output);
                 }
                 else
                 {
                     _outputFailed = true;
+                    _outputDescription = "初始化失败（返回空）";
                 }
             }
             catch (Exception ex)
             {
                 _outputFailed = true;
+                _outputDescription = "初始化失败";
                 MainViewModel.Dbg("Output init FAIL: " + ex.Message);
             }
+        }
+
+        static string DescribeOutput(IAudioOutput output)
+        {
+            if (output is WasapiAudioOutput) return "WASAPI 独占";
+            if (output is WaveOutAudioOutput) return "WaveOutEvent（共享模式）";
+            return output.GetType().Name;
         }
 
         /// <summary>默认输出工厂：WASAPI 独占开启时优先尝试，失败回退 WaveOutEvent。</summary>
@@ -264,14 +224,14 @@ namespace Aurora
                 if (_disposed) return false;
                 _sessionId++;
                 long session = _sessionId;
-                RemoveAllInputs();
+                _inputs.RemoveAll();
 
                 if (!File.Exists(path)) return false;
-                TrackInput input = BuildInput(path, session);
+                TrackInput input = _inputs.BuildInput(path, session, _rgLinear);
                 if (input == null) return false;
-                AddInput(input);   // 关键：接入混音器（缺失会导致 mixer 无输入→永久静音、进度不动）
+                _inputs.Add(input);   // 关键：接入混音器（缺失会导致 mixer 无输入→永久静音、进度不动）
 
-                _current = input;
+                _inputs.Current = input;
                 _currentPath = path;
                 State = PlaybackState.Stopped;
                 RaiseStateChanged();
@@ -290,18 +250,18 @@ namespace Aurora
                 long session = _sessionId;
 
                 if (!File.Exists(path)) return false;
-                TrackInput input = BuildInput(path, session);
+                TrackInput input = _inputs.BuildInput(path, session, _rgLinear);
                 if (input == null) return false;
 
                 input.Gain.BeginFadeIn(fadeSeconds);
-                AddInput(input);
+                _inputs.Add(input);
 
-                TrackInput old = _current;
-                _current = input;
+                TrackInput old = _inputs.Current;
+                _inputs.Current = input;
                 _currentPath = path;
                 if (old != null)
                     old.Gain.BeginFadeOut(0, fadeSeconds);
-                ScheduleOldInputRemoval(old, fadeSeconds);
+                _inputs.ScheduleOldInputRemoval(old, fadeSeconds);
 
                 if (State != PlaybackState.Playing)
                 {
@@ -311,14 +271,6 @@ namespace Aurora
                 RaiseStateChanged();
                 return true;
             }
-        }
-
-        /// <summary>把输入接入混音器（统一入口，维护 InMixer 标记）。</summary>
-        void AddInput(TrackInput input)
-        {
-            _mixer.AddMixerInput(input.Gain);
-            input.InMixer = true;
-            _inputs.Add(input);
         }
 
         public void Play()
@@ -357,7 +309,7 @@ namespace Aurora
             {
                 if (_disposed) return;
                 _deviceStopping = true;   // 主动停止：忽略设备 PlaybackStopped
-                RemoveAllInputs();
+                _inputs.RemoveAll();
                 try { if (_output != null) _output.Stop(); } catch { }
                 State = PlaybackState.Stopped;
                 RaiseStateChanged();
@@ -376,121 +328,19 @@ namespace Aurora
             lock (_lock)
             {
                 _rgLinear = Math.Max(0f, Math.Min(8f, linear));
-                if (_current != null) _current.Gain.BaseGain = _rgLinear;
+                TrackInput cur = CurrentInput;
+                if (cur != null) cur.Gain.BaseGain = _rgLinear;
             }
         }
 
-        /// <summary>
-        /// 预加载解码器（后台线程打开，下一首 Load/CrossfadeTo 时零成本取用）。
-        /// 幂等：同一路径重复调用只打开一次。
-        /// </summary>
+        /// <summary>预加载解码器（转发 TrackInputManager，后台线程打开）。</summary>
         public void Preload(string path)
         {
             lock (_lock)
             {
-                if (_disposed || string.IsNullOrEmpty(path) || !File.Exists(path)) return;
-                if (_preloadedPath == path) return;
-                DisposePreloaded();
-                _preloadedPath = path;
+                if (_disposed) return;
+                _inputs.Preload(path);
             }
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                WaveStream reader = null;
-                try { reader = _decoder(path); }
-                catch { reader = null; }
-                lock (_lock)
-                {
-                    if (_disposed) { try { if (reader != null) reader.Dispose(); } catch { } return; }
-                    if (_preloadedPath != path) { try { if (reader != null) reader.Dispose(); } catch { } return; }
-                    if (reader != null) _preloaded = new TrackInput { Path = path, Reader = reader };
-                }
-            });
-        }
-
-        /// <summary>取预载解码器（路径匹配才用，否则现开；不匹配的旧预载随手丢弃）。</summary>
-        WaveStream TakePreloaded(string path)
-        {
-            if (_preloaded != null && string.Equals(_preloadedPath, path, StringComparison.OrdinalIgnoreCase))
-            {
-                var reader = _preloaded.Reader;
-                _preloaded = null;
-                _preloadedPath = null;
-                return reader;
-            }
-            DisposePreloaded();
-            return null;
-        }
-
-        /// <summary>构建一条曲目输入：优先取预载解码器，否则现开；归一化 + 增益包络。</summary>
-        TrackInput BuildInput(string path, long session)
-        {
-            try
-            {
-                WaveStream reader = TakePreloaded(path) ?? _decoder(path);
-                ISampleProvider normalized = AudioDecoders.NormalizeToMixer(reader.ToSampleProvider());
-                var gain = new GainFadeSampleProvider(normalized) { BaseGain = _rgLinear };
-                return new TrackInput { SessionId = session, Path = path, Reader = reader, Gain = gain };
-            }
-            catch (Exception ex)
-            {
-                MainViewModel.Dbg("BuildInput FAIL: " + path + " -> " + ex.GetType().Name + ": " + ex.Message);
-                return null;
-            }
-        }
-
-        void DisposePreloaded()
-        {
-            if (_preloaded != null)
-            {
-                try { _preloaded.Reader.Dispose(); } catch { }
-                _preloaded = null;
-            }
-            _preloadedPath = null;
-        }
-
-        /// <summary>淡出完成后兜底移除旧输入（正常情况下其自然结束会先触发清理）。</summary>
-        void ScheduleOldInputRemoval(TrackInput old, double fadeSeconds)
-        {
-            if (old == null) return;
-            var timer = new System.Threading.Timer(_ =>
-            {
-                lock (_lock)
-                {
-                    if (_disposed) return;
-                    if (_current != old && _inputs.Contains(old))
-                        RemoveInput(old);
-                }
-            }, null, (int)(fadeSeconds * 1000) + 800, Timeout.Infinite);
-        }
-
-        void RemoveInput(TrackInput input)
-        {
-            if (_inputs.Remove(input))
-            {
-                if (input.InMixer)
-                {
-                    try { _mixer.RemoveMixerInput(input.Gain); } catch { }
-                    input.InMixer = false;
-                }
-                input.ReaderDisposed = true;
-                try { input.Reader.Dispose(); } catch { }
-            }
-        }
-
-        void RemoveAllInputs()
-        {
-            foreach (TrackInput input in _inputs)
-            {
-                if (input.InMixer)
-                {
-                    try { _mixer.RemoveMixerInput(input.Gain); } catch { }
-                    input.InMixer = false;
-                }
-                input.ReaderDisposed = true;
-                try { input.Reader.Dispose(); } catch { }
-            }
-            _inputs.Clear();
-            _current = null;
         }
 
         /* ============================================================
@@ -500,24 +350,14 @@ namespace Aurora
         /// <summary>曲目输入自然播完（混音器移除该输入时触发）→ 携带会话 ID 上报结束。</summary>
         void OnMixerInputEnded(object sender, SampleProviderEventArgs e)
         {
-            TrackInput input = null;
             lock (_lock)
             {
                 if (_disposed) return;
-                foreach (TrackInput t in _inputs)
-                {
-                    if (ReferenceEquals(t.Gain, e.SampleProvider)) { input = t; break; }
-                }
-                if (input != null)
-                {
-                    _inputs.Remove(input);
-                    input.ReaderDisposed = true;
-                    try { input.Reader.Dispose(); } catch { }
-                }
-                if (input != null && ReferenceEquals(input, _current))
+                TrackInput input = _inputs.TakeEnded(e.SampleProvider);
+                if (input != null && ReferenceEquals(input, _inputs.Current))
                 {
                     // 当前曲目自然播完：会话仍有效（未发生新的 Load/CrossfadeTo）
-                    _current = null;
+                    _inputs.Current = null;
                     State = PlaybackState.Stopped;
                     var handler = PlaybackEnded;
                     if (handler != null)
@@ -576,10 +416,52 @@ namespace Aurora
                 if (_disposed) return;
                 _disposed = true;
                 _deviceStopping = true;
-                RemoveAllInputs();
-                DisposePreloaded();
+                _inputs.RemoveAll();
+                _inputs.MarkDisposed();
                 try { if (_output != null) _output.Dispose(); } catch { }
                 _output = null;
+            }
+        }
+
+        /* ============================================================
+         * 音频诊断（阶段 7）
+         * ============================================================ */
+
+        /// <summary>组装当前音频链路诊断文本（UI 线程调用；只读，不改状态）。</summary>
+        public string GetDiagnostics()
+        {
+            lock (_lock)
+            {
+                var sb = new StringBuilder();
+                TrackInput cur = CurrentInput;
+                if (cur == null || cur.ReaderDisposed)
+                {
+                    sb.AppendLine("当前曲目：无");
+                }
+                else
+                {
+                    var wf = cur.Reader.WaveFormat;
+                    string ext = string.IsNullOrEmpty(_currentPath) ? "-" :
+                        Path.GetExtension(_currentPath).TrimStart('.').ToUpperInvariant();
+                    sb.AppendLine("当前曲目：" + (_currentPath ?? "-"));
+                    sb.AppendLine("解码格式：" + ext + " / " + wf.SampleRate + " Hz / " +
+                        wf.BitsPerSample + " bit / " +
+                        (wf.Channels == 1 ? "单声道" : wf.Channels + " 声道"));
+                    sb.AppendLine("总时长：" + cur.Reader.TotalTime.ToString(@"mm\:ss"));
+                    sb.AppendLine("混音器输入数：" + _inputs.InputCount);
+                }
+                double rgDb = 20.0 * Math.Log10(Math.Max(_rgLinear, 0.0001));
+                sb.AppendLine("ReplayGain：" + (PlaybackCoordinator.ReplayGainEnabled
+                    ? rgDb.ToString("+0.0;-0.0;0.0") + " dB（线性 " + _rgLinear.ToString("0.000") + "）"
+                    : "已关闭"));
+                double cf = PlaybackCoordinator.CrossfadeSeconds;
+                sb.AppendLine("跨淡入淡出：" + (cf > 0 ? cf.ToString("0.#") + " 秒" : "关闭"));
+                sb.AppendLine("输出设备：" + _outputDescription +
+                    (Settings.Get("wasapi_exclusive", "0") == "1" ? "（已请求独占）" : ""));
+                sb.AppendLine("输出就绪：" + (_outputFailed ? "失败（播放将无声）" : (_output != null ? "是" : "后台预热中")));
+                sb.AppendLine("会话 ID：" + _sessionId);
+                sb.AppendLine("引擎版本：Aurora " + AppInfo.Version);
+                return sb.ToString();
             }
         }
     }

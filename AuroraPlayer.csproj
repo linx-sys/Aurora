@@ -42,6 +42,9 @@
     <Compile Include="src\NetMatch.cs" />
     <Compile Include="src\NetMatchSettingsDialog.cs" />
     <Compile Include="src\ILyricsProvider.cs" />
+    <Compile Include="src\SpectrumCapture.cs" />
+    <Compile Include="src\TrackInputManager.cs" />
+    <Compile Include="src\AudioDiagnosticsDialog.cs" />
     <Compile Include="src\IPlaybackService.cs" />
     <Compile Include="src\IAudioOutput.cs" />
     <Compile Include="src\WaveOutAudioOutput.cs" />

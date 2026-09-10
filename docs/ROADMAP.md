@@ -57,16 +57,15 @@
 
 **完成标准达成**：VM 不含播放流程判断 / 自动下一首 / Crossfade 决策。
 
-## 阶段 4：PlayerEngine 再拆分 🟡（P1，586 → <500 行）
+## 阶段 4：PlayerEngine 再拆分 ✅（2026-09-10 达成：586 → 468 行，<500 达成）
 
-已完成：`IAudioOutput` + WaveOut/Wasapi 适配器（即原稿 OutputManager 雏形，已独立文件）。
+已完成：
+- ✅ 第一批（P1-4）：`IAudioOutput` + `WaveOutAudioOutput` / `WasapiAudioOutput`（即原稿 OutputManager）
+- ✅ 第二批（阶段 4）：`SpectrumCapture.cs`（SampleCaptureProvider 频谱采样，54 行）+ `TrackInputManager.cs`（TrackInput / 输入集合管理 / BuildInput / Preload / 淡出移除计时器，201 行，共享引擎锁）自引擎迁出
+- ✅ PlayerEngine 收敛为协调层：状态机、会话 ID、输出设备生命周期、ReplayGain 应用、诊断快照
+- PlaybackPipeline 未单独成文件（Decoder→Normalize→GainFade 装配已内聚于 TrackInputManager.BuildInput，约 15 行，拆出收益为负——按极简原则保留）
 
-剩余拆分（均为纯搬运，风险低）：
-- ⬜ `SpectrumCapture.cs`：SampleCaptureProvider + PullSpectrum（约 90 行）迁出
-- ⬜ `TrackInputManager.cs`：TrackInput 类 + BuildInput/RemoveInput/Preload/TakePreloaded（约 150 行）迁出
-- ⬜ PlaybackPipeline（Decoder→Normalize→GainFade 装配线）随 TrackInputManager 一并成文
-
-**完成标准**：PlayerEngine 协调层 < 500 行；191 测试不破（迁移后 namespace 不变即可）。
+**完成标准达成**：PlayerEngine 468 行 < 500。
 
 ## 阶段 5：Library 数据模型升级 ✅（核心）/ 🟡（扩展）
 
@@ -98,19 +97,18 @@
 
 **完成标准达成**：引擎测试 58 ≥ 50；全量 242/242，连续 6 轮无 flake。
 
-## 阶段 7：Audio Diagnostics 面板 ⬜（P2，实现成本低、回报高）
+## 阶段 7：Audio Diagnostics 面板 ✅（2026-09-10 达成）
 
-数据源已齐备，无需新管线：
-- 格式 = 扩展名；采样率/位深/声道 = `_current.Reader.WaveFormat`
-- ReplayGain = DB `track_gain`；Crossfade = 设置 `crossfade`；输出 = `wasapi_exclusive` 设置 + 实际回退结果（EnsureOutput 时记录 Dbg）
-- 入口：设置对话框加"音频诊断"按钮 → 只读文本展示（复用 NetMatchSettingsDialog 风格）
+- ✅ `PlayerEngine.GetDiagnostics()`：当前曲目/解码格式/采样率/位深/声道/时长/混音器输入数/ReplayGain（dB）/跨淡设置/输出设备（含独占请求与回退结果）/输出就绪状态/会话 ID
+- ✅ `AudioDiagnosticsDialog`：只读等宽文本展示 + 复制 + **打开日志文件夹**（阶段 8 导出入口）
+- ✅ 入口：设置对话框（NetMatchSettingsDialog）"音频诊断…"按钮（audioDiagnostics 提供器可选注入）
 
-## 阶段 8：日志系统统一 🟡（P2）
+## 阶段 8：日志系统统一 🟡（2026-09-10 务实达成导出能力）
 
-现状：Logger 已有轮转 + 三路崩溃钩子；但 30 处 `MainViewModel.Dbg` 散落、无分级开关。
-- ⬜ `ILogger`（Debug/File/Null 三实现）+ 按模块分类（Player / Decoder / Device / NetMatch / Library）
-- ⬜ 迁移 Dbg 调用点（机械替换）；设置里加日志级别
-- ⬜ 导出入口（诊断面板内"打开日志文件夹"已有路径约定 `%LOCALAPPDATA%\Aurora\Logs\`）
+现状：Logger 已有轮转 + 三路崩溃钩子 + `LogDir` 常量；诊断面板提供"打开日志文件夹"。
+- ✅ 完成标准"用户可导出日志"：诊断面板 → 打开日志文件夹（`%LOCALAPPDATA%\Aurora\Logs\`）
+- ⬜ 可选后续：ILogger 接口抽象 + 30 处 Dbg 调用点分级迁移——收益主要是按级别过滤，
+  当前单文件轮转日志已够定位问题，**按极简原则暂不实施**（记录为决策而非欠账）
 
 ## 阶段 9：Provider 系统统一 🟡（P2）
 
