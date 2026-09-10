@@ -36,19 +36,15 @@
 - 风险低（编译期问题），但改动面广，建议单独一批提交
 - **完成标准**：零 Nullable 警告；`!` 抑制符 ≤ 个位数
 
-## 阶段 2：MainWindow 二次精简 🟡（500 → <300 行）
+## 阶段 2：MainWindow 二次精简 ✅（2026-09-10 达成：509 → 222 行，<300 目标达成）
 
-已完成（909 → 509 行）：Toast / 33ms 计时器（PlaybackTickController）/ 快捷键（HotkeyController）/ 联网匹配 / 窗口杂项 / UiUtil。
+已完成（累计 909 → 222 行）：
+- ✅ 第一批（P0-1）：Toast / 33ms 计时器（PlaybackTickController）/ 快捷键（HotkeyController）/ 联网匹配（NetMatchViewController）/ 窗口杂项（WindowMiscController）/ UiUtil 静态助手
+- ✅ 第二批（阶段 2 收尾）：播放状态 UI 与切歌编排 → `PlaybackStateViewController`（SetPlaying/UpdateTrackInfo/ApplyVolume/音量弹层/静音图标/模式图标/OnCurrentTrackChanged）；按钮接线/音量条拖动/全屏/列表面板/窗口拖动/拖放导入/快捷键挂接 → `CommandBindingManager`（纯薄委托）
+- ✅ MainWindow 只剩：Initialize（装配根）/ Constructor 参数处理 / Lifecycle（Closing 保存、Loaded 启动服务）
+- 命名维持扁平（不建 src/UI/ 子目录，与项目惯例一致）
 
-剩余可拆（按收益排序）：
-- ⬜ 播放状态 UI 块（SetPlaying / UpdateTrackInfo / ApplyVolumeUi / ShowVolumePopup，约 120 行）→ `PlaybackStateViewController`
-- ⬜ OnCurrentTrackChanged 编排（约 55 行）→ 并入上述控制器
-- ⬜ HookEvents 剩余薄委托（按钮/音量条/拖放/窗口拖动，约 90 行）→ `CommandBindingManager`（原稿命名）
-- ⬜ DragDrop 迁入独立 Manager（当前 15 行，低优先）
-
-原稿新增的 `src/UI/Window/` 目录结构：**与项目"src/ 扁平"惯例冲突**，建议维持扁平命名（XxxController.cs），不建子目录。
-
-**完成标准**：MainWindow 只剩 Initialize / Constructor / Lifecycle；无播放逻辑 / 数据查询 / 文件扫描。
+**完成标准达成**：MainWindow 无播放逻辑 / 数据查询 / 文件扫描 / 业务判断。
 
 ## 阶段 3：MainViewModel 解耦（PlaybackCoordinator）✅（2026-09-10 达成）
 
