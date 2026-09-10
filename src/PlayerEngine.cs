@@ -33,7 +33,7 @@ namespace Aurora
     /// <summary>频谱数据就绪事件参数。</summary>
     public class SpectrumDataEventArgs : EventArgs
     {
-        public float[] Samples;   // 当前播放帧的 PCM 浮点样本（交错）
+        public float[] Samples = null!;   // 当前播放帧的 PCM 浮点样本（交错）
         public int Channels;
         public int SampleRate;
     }
@@ -42,7 +42,7 @@ namespace Aurora
     public class PlaybackEndedEventArgs : EventArgs
     {
         public long SessionId;
-        public string Path;
+        public string Path = null!;
     }
 
     /// <summary>
@@ -51,16 +51,16 @@ namespace Aurora
     /// </summary>
     public class PlayerEngine : IPlaybackService
     {
-        IAudioOutput _output;
-        readonly Func<ISampleProvider, IAudioOutput> _outputFactory;   // P1-4：输出设备工厂（测试注入 fake）
-        readonly Func<string, WaveStream> _decoder;                    // P1-4：解码入口（测试注入 fake）
-        SampleCaptureProvider _capture;      // 频谱采样（挂在混音器输出）
-        MixingSampleProvider _mixer;
-        TrackInputManager _inputs;           // 曲目输入/预载管理（阶段 4 拆分）
+        IAudioOutput? _output;
+        readonly Func<ISampleProvider, IAudioOutput> _outputFactory = null!;   // P1-4：输出设备工厂（测试注入 fake）
+        readonly Func<string, WaveStream> _decoder = null!;                    // P1-4：解码入口（测试注入 fake）
+        SampleCaptureProvider _capture = null!;      // 频谱采样（挂在混音器输出）
+        MixingSampleProvider _mixer = null!;
+        TrackInputManager _inputs = null!;           // 曲目输入/预载管理（阶段 4 拆分）
         readonly object _lock = new object();
 
         long _sessionId;
-        string _currentPath;
+        string? _currentPath;
         bool _disposed;
         bool _deviceStopping;                // 主动 Stop 时忽略设备 PlaybackStopped
         bool _outputFailed;                  // 设备初始化失败（不再重试，播放静默降级）
@@ -71,13 +71,13 @@ namespace Aurora
         /// <summary>当前播放会话 ID（每次 Load/CrossfadeTo 递增；切歌竞态过滤依据）。</summary>
         public long SessionId { get { lock (_lock) { return _sessionId; } } }
 
-        public event EventHandler<PlaybackStateChangedEventArgs> StateChanged;
-        public event EventHandler<SpectrumDataEventArgs> SpectrumDataReady;
-        public event EventHandler<PlaybackEndedEventArgs> PlaybackEnded;
+        public event EventHandler<PlaybackStateChangedEventArgs>? StateChanged;
+        public event EventHandler<SpectrumDataEventArgs>? SpectrumDataReady;
+        public event EventHandler<PlaybackEndedEventArgs>? PlaybackEnded;
 
         public PlaybackState State { get; private set; }
 
-        TrackInput CurrentInput { get { return _inputs.Current; } }
+        TrackInput? CurrentInput { get { return _inputs.Current; } }
 
         public TimeSpan Position
         {
@@ -85,7 +85,7 @@ namespace Aurora
             {
                 lock (_lock)
                 {
-                    TrackInput cur = CurrentInput;
+                    TrackInput? cur = CurrentInput;
                     return cur != null && !cur.ReaderDisposed ? cur.Reader.CurrentTime : TimeSpan.Zero;
                 }
             }
@@ -93,7 +93,7 @@ namespace Aurora
             {
                 lock (_lock)
                 {
-                    TrackInput cur = CurrentInput;
+                    TrackInput? cur = CurrentInput;
                     if (cur == null || cur.ReaderDisposed) return;
                     // 越界钳制到 [0, Duration]（负值会让 MF 抛 ArgumentOutOfRangeException）
                     if (value < TimeSpan.Zero) value = TimeSpan.Zero;
@@ -110,7 +110,7 @@ namespace Aurora
             {
                 lock (_lock)
                 {
-                    TrackInput cur = CurrentInput;
+                    TrackInput? cur = CurrentInput;
                     return cur != null && !cur.ReaderDisposed ? cur.Reader.TotalTime : TimeSpan.Zero;
                 }
             }
@@ -126,7 +126,7 @@ namespace Aurora
             }
         }
 
-        public string CurrentPath { get { lock (_lock) { return _currentPath; } } }
+        public string? CurrentPath { get { lock (_lock) { return _currentPath; } } }
 
         /// <summary>生产构造：真实输出设备（WaveOut / WASAPI 独占回退）+ 真实解码器。</summary>
         public PlayerEngine() : this(null, null) { }
@@ -136,7 +136,7 @@ namespace Aurora
         /// 生产路径（factory=null）不在此同步建设备——设备创建后台预热（P2-5a 启动提速），
         /// 首次 Play/Pause/Stop 时按需补建；测试注入则立即创建（同步语义可预期）。
         /// </summary>
-        public PlayerEngine(Func<ISampleProvider, IAudioOutput> outputFactory, Func<string, WaveStream> decoder)
+        public PlayerEngine(Func<ISampleProvider, IAudioOutput>? outputFactory, Func<string, WaveStream>? decoder)
         {
             State = PlaybackState.Stopped;
             _outputFactory = outputFactory ?? DefaultCreateOutput;
@@ -227,7 +227,7 @@ namespace Aurora
                 _inputs.RemoveAll();
 
                 if (!File.Exists(path)) return false;
-                TrackInput input = _inputs.BuildInput(path, session, _rgLinear);
+                TrackInput? input = _inputs.BuildInput(path, session, _rgLinear);
                 if (input == null) return false;
                 _inputs.Add(input);   // 关键：接入混音器（缺失会导致 mixer 无输入→永久静音、进度不动）
 
@@ -250,13 +250,13 @@ namespace Aurora
                 long session = _sessionId;
 
                 if (!File.Exists(path)) return false;
-                TrackInput input = _inputs.BuildInput(path, session, _rgLinear);
+                TrackInput? input = _inputs.BuildInput(path, session, _rgLinear);
                 if (input == null) return false;
 
                 input.Gain.BeginFadeIn(fadeSeconds);
                 _inputs.Add(input);
 
-                TrackInput old = _inputs.Current;
+                TrackInput? old = _inputs.Current;
                 _inputs.Current = input;
                 _currentPath = path;
                 if (old != null)
@@ -328,7 +328,7 @@ namespace Aurora
             lock (_lock)
             {
                 _rgLinear = Math.Max(0f, Math.Min(8f, linear));
-                TrackInput cur = CurrentInput;
+                TrackInput? cur = CurrentInput;
                 if (cur != null) cur.Gain.BaseGain = _rgLinear;
             }
         }
@@ -348,12 +348,12 @@ namespace Aurora
          * ============================================================ */
 
         /// <summary>曲目输入自然播完（混音器移除该输入时触发）→ 携带会话 ID 上报结束。</summary>
-        void OnMixerInputEnded(object sender, SampleProviderEventArgs e)
+        void OnMixerInputEnded(object? sender, SampleProviderEventArgs e)
         {
             lock (_lock)
             {
                 if (_disposed) return;
-                TrackInput input = _inputs.TakeEnded(e.SampleProvider);
+                TrackInput? input = _inputs.TakeEnded(e.SampleProvider);
                 if (input != null && ReferenceEquals(input, _inputs.Current))
                 {
                     // 当前曲目自然播完：会话仍有效（未发生新的 Load/CrossfadeTo）
@@ -368,7 +368,7 @@ namespace Aurora
         }
 
         /// <summary>设备级 PlaybackStopped：只在主动 Stop()/Dispose() 时发生，直接忽略。</summary>
-        void OnDeviceStopped(object sender, StoppedEventArgs e)
+        void OnDeviceStopped(object? sender, StoppedEventArgs e)
         {
             _deviceStopping = false;
             // 自然结束走 OnMixerInputEnded；这里无需处理。
@@ -380,7 +380,7 @@ namespace Aurora
         {
             if (_capture == null || _output == null || State != PlaybackState.Playing) return;
 
-            float[] samples = _capture.GetLastSamples();
+            float[]? samples = _capture.GetLastSamples();
             if (samples == null || samples.Length == 0) return;
 
             var handler = SpectrumDataReady;
@@ -433,7 +433,7 @@ namespace Aurora
             lock (_lock)
             {
                 var sb = new StringBuilder();
-                TrackInput cur = CurrentInput;
+                TrackInput? cur = CurrentInput;
                 if (cur == null || cur.ReaderDisposed)
                 {
                     sb.AppendLine("当前曲目：无");

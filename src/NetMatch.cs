@@ -158,7 +158,7 @@ namespace Aurora
          * ============================================================ */
 
         /// <summary>查找歌词文件：先查缓存目录，再查同目录（向后兼容旧版）。</summary>
-        public static string FindLyricFile(string musicPath)
+        public static string? FindLyricFile(string musicPath)
         {
             try
             {
@@ -219,7 +219,7 @@ namespace Aurora
 
                 if (!lyricCached || !coverCached)
                 {
-                    string lastError = null;
+                    string? lastError = null;
                     foreach (ILyricsProvider provider in Providers)
                     {
                         try

@@ -1,3 +1,4 @@
+#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
 /* ============================================================
  * LyricsViewController.cs — 歌词视图控制器
  * 从 MainWindow.cs 拆出（原属"歌词渲染"职责）。

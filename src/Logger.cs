@@ -60,7 +60,7 @@ namespace Aurora
         /// 崩溃日志：独立文件，含版本、OS、异常类型与完整堆栈。
         /// 返回日志路径（便于 UI 提示用户反馈时附上）；失败返回 null。
         /// </summary>
-        public static string Crash(string source, Exception ex)
+        public static string? Crash(string source, Exception? ex)
         {
             try
             {

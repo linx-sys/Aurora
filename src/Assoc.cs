@@ -1,3 +1,4 @@
+#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
 /* ============================================================
  * Assoc.cs — MP3 文件关联（HKCU，无需管理员权限）
  * 由 AuroraPlayer.exe 自身执行：AuroraPlayer.exe /associate

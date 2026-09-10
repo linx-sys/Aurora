@@ -22,14 +22,14 @@ namespace Aurora
         readonly Action<Action> _ui;          // UI 线程调度（VM 传 Dispatcher.BeginInvoke；测试传内联）
 
         readonly HashSet<string> _rgScanning = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        Track _pendingNext;                   // 预载决策的下一首
-        Track _current;
+        Track? _pendingNext;                   // 预载决策的下一首
+        Track? _current;
 
         /// <summary>当前曲目变更事件（UI/VM 层订阅；含 LoadFailed 失败通知）。</summary>
-        public event EventHandler<CurrentTrackChangedEventArgs> CurrentTrackChanged;
+        public event EventHandler<CurrentTrackChangedEventArgs>? CurrentTrackChanged;
 
         /// <summary>播放状态同步（参数 = 是否播放中；引擎事件驱动，UI 线程回调）。</summary>
-        public event EventHandler<bool> PlayStateChanged;
+        public event EventHandler<bool>? PlayStateChanged;
 
         public PlaybackCoordinator(IPlaybackService player, ILibraryStore library,
             PlaylistManager playlist, Action<Action> ui)
@@ -48,7 +48,7 @@ namespace Aurora
 
         public PlaybackController Playback { get { return _playback; } }
         public PlaylistManager Playlist { get { return _playlist; } }
-        public Track CurrentTrack { get { return _current; } }
+        public Track? CurrentTrack { get { return _current; } }
 
         public PlayMode Mode
         {
@@ -77,13 +77,13 @@ namespace Aurora
          * ============================================================ */
 
         /// <summary>播放指定曲目（recordHistory 默认入随机轨迹）。</summary>
-        public void PlayTrack(Track t, bool autoplay = true)
+        public void PlayTrack(Track? t, bool autoplay = true)
         {
             PlayTrack(t, autoplay, recordHistory: true);
         }
 
         /// <summary>播放指定曲目。recordHistory=false 用于沿随机轨迹回退/前进（不重复入栈）。</summary>
-        public void PlayTrack(Track t, bool autoplay, bool recordHistory)
+        public void PlayTrack(Track? t, bool autoplay, bool recordHistory)
         {
             if (t == null) return;
             MainViewModel.Dbg("PlayTrack: " + t.Title + " autoplay=" + autoplay + " record=" + recordHistory);
@@ -124,7 +124,7 @@ namespace Aurora
         {
             var tracks = _playlist.Tracks;
             if (tracks.Count == 0) return;
-            Track next;
+            Track? next;
             if (manual)
             {
                 // 随机模式：优先沿播放轨迹"前进"（重播回退过的歌），无可前进再随机新曲
@@ -157,7 +157,7 @@ namespace Aurora
             var tracks = _playlist.Tracks;
             if (tracks.Count == 0) return;
             // 随机模式：真正回退刚听过的歌（播放轨迹），而不是简单索引-1
-            if (_playback.Mode == PlayMode.Shuffle && _playback.TryGetShufflePrev(out Track prev))
+            if (_playback.Mode == PlayMode.Shuffle && _playback.TryGetShufflePrev(out Track? prev))
             {
                 PlayTrack(prev, true, recordHistory: false);
                 return;
@@ -263,7 +263,7 @@ namespace Aurora
                 _player.SetReplayGain(1f);
                 return;
             }
-            TrackRow row = _library.TryGet(t.FilePath);
+            TrackRow? row = _library.TryGet(t.FilePath);
             if (row != null && row.TrackGain.HasValue)
             {
                 _player.SetReplayGain((float)Loudness.LinearFor(row.TrackGain.Value, row.TrackPeak ?? 1.0));
@@ -285,10 +285,10 @@ namespace Aurora
             {
                 try
                 {
-                    Loudness.Result r = Loudness.AnalyzeFile(path);
+                    Loudness.Result? r = Loudness.AnalyzeFile(path);
                     if (r != null)
                     {
-                        TrackRow row = _library.TryGet(path)
+                        TrackRow? row = _library.TryGet(path)
                             ?? new TrackRow { Path = path, FileName = System.IO.Path.GetFileName(path) };
                         Library.GetFingerprint(path, out long bytes, out long mtime);
                         if (row.Bytes == 0) row.Bytes = bytes;
@@ -319,7 +319,7 @@ namespace Aurora
          * 引擎事件（会话竞态第二道防线）
          * ============================================================ */
 
-        void OnPlayerStateChanged(object sender, PlaybackStateChangedEventArgs e)
+        void OnPlayerStateChanged(object? sender, PlaybackStateChangedEventArgs e)
         {
             _ui(() =>
             {
@@ -328,7 +328,7 @@ namespace Aurora
             });
         }
 
-        void OnPlaybackEnded(object sender, PlaybackEndedEventArgs e)
+        void OnPlaybackEnded(object? sender, PlaybackEndedEventArgs e)
         {
             // 后台线程立即快照"结束播放的会话 ID"。PlaybackEnded 经 UI 派发有延迟
             // （天然切歌→回调排队），若期间用户已点击切歌（引擎已 Load 新歌，
@@ -347,7 +347,7 @@ namespace Aurora
             });
         }
 
-        void SetCurrent(Track t)
+        void SetCurrent(Track? t)
         {
             _current = t;
         }

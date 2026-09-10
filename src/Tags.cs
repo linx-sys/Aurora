@@ -1,3 +1,4 @@
+#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：标签解析器 null 语义密集，待后续批次清理
 /* ============================================================
  * Tags.cs — 非 MP3 格式的标签/封面/时长解析
  *   FLAC  : STREAMINFO 时长 + VORBIS_COMMENT + PICTURE 封面

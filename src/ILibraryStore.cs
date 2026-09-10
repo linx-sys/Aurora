@@ -12,7 +12,7 @@ namespace Aurora
     public interface ILibraryStore
     {
         /// <summary>按路径取行；不存在返回 null。</summary>
-        TrackRow TryGet(string path);
+        TrackRow? TryGet(string path);
 
         /// <summary>取目录前缀下的所有行（DB 优先启动 / 增量清理用）。</summary>
         List<TrackRow> GetByPrefix(string dirPrefix);

@@ -12,7 +12,7 @@ namespace Aurora
     {
         readonly WasapiOut _wasapi;
 
-        public event EventHandler<StoppedEventArgs> PlaybackStopped;
+        public event EventHandler<StoppedEventArgs>? PlaybackStopped;
 
         public WasapiAudioOutput(ISampleProvider source)
         {

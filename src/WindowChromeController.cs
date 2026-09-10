@@ -1,3 +1,4 @@
+#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
 /* ============================================================
  * WindowChromeController.cs — 无边框窗口的 Win32 行为
  * 从 MainWindow.cs 拆出（原属"窗口生命周期/Win32 interop"职责）。

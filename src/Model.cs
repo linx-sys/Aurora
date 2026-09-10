@@ -13,19 +13,19 @@ namespace Aurora
 {
     public class Track : INotifyPropertyChanged
     {
-        public string FilePath;
-        public string FileName;
-        public byte[] Cover;
-        public string LrcText;
+        public string FilePath = null!;
+        public string FileName = null!;
+        public byte[]? Cover;
+        public string? LrcText;
         public TimeSpan Duration;
         public long Bytes;
 
-        string _title, _artist, _album;
+        string? _title, _artist, _album;
         bool _isPlaying;
 
-        public string Title { get { return _title; } set { _title = value; Raise("Title"); } }
-        public string Artist { get { return _artist; } set { _artist = value; Raise("Artist"); } }
-        public string Album { get { return _album; } set { _album = value; Raise("Album"); } }
+        public string? Title { get { return _title; } set { _title = value; Raise("Title"); } }
+        public string? Artist { get { return _artist; } set { _artist = value; Raise("Artist"); } }
+        public string? Album { get { return _album; } set { _album = value; Raise("Album"); } }
         public bool IsPlaying { get { return _isPlaying; } set { _isPlaying = value; Raise("IsPlaying"); } }
 
         public string DurationText
@@ -51,13 +51,13 @@ namespace Aurora
 
         public bool HasLrc { get { return !string.IsNullOrEmpty(LrcText); } }
 
-        public string IndexText { get; set; }
+        public string? IndexText { get; set; }
 
         public void RefreshDurationText() { Raise("DurationText"); }
 
-        ImageSource _thumb;
+        ImageSource? _thumb;
         /// <summary>列表缩略图：真封面或按歌名生成（首次访问时生成并缓存）。</summary>
-        public System.Windows.Media.ImageSource Thumb
+        public System.Windows.Media.ImageSource? Thumb
         {
             get
             {
@@ -77,7 +77,7 @@ namespace Aurora
             Raise("Thumb");
         }
 
-        public event PropertyChangedEventHandler PropertyChanged;
+        public event PropertyChangedEventHandler? PropertyChanged;
         void Raise(string prop)
         {
             var h = PropertyChanged;
@@ -144,7 +144,7 @@ namespace Aurora
         /// 标签元数据，未命中才解析并回写 DB；cleanupDir 非空时清理该目录下已消失文件的过期行。
         /// lrc 文本与外部封面兜底保持每次现读（联网匹配后会出现，不能缓存）。
         /// </summary>
-        public static List<Track> BuildTracksIncremental(IEnumerable<string> files, ILibraryStore db, string cleanupDir)
+        public static List<Track> BuildTracksIncremental(IEnumerable<string> files, ILibraryStore? db, string? cleanupDir)
         {
             var lrcMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var audio = new List<string>();
@@ -204,7 +204,7 @@ namespace Aurora
                 if (!File.Exists(row.Path)) continue;   // 已消失：等后台差分同步清理 DB 行
                 var lrcMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 // 同名 lrc 探测：xxx.lrc 优先，其次 xxx.mp3.lrc（与扫描期配对规则一致）
-                string baseName = Path.Combine(Path.GetDirectoryName(row.Path), Path.GetFileNameWithoutExtension(row.Path));
+                string baseName = Path.Combine(Path.GetDirectoryName(row.Path) ?? "", Path.GetFileNameWithoutExtension(row.Path));
                 string lrc = baseName + ".lrc";
                 if (!File.Exists(lrc)) lrc = baseName + Path.GetExtension(row.Path) + ".lrc";
                 if (File.Exists(lrc)) lrcMap[Path.GetFileNameWithoutExtension(row.Path)] = lrc;
@@ -221,14 +221,14 @@ namespace Aurora
         }
 
         /// <summary>构建单条轨道：缓存命中走 FromMetadata 复用，未命中解析并记入回写队列。</summary>
-        static Track BuildOne(string path, Dictionary<string, string> lrcMap, ILibraryStore db, List<TrackRow> toUpsert)
+        static Track BuildOne(string path, Dictionary<string, string> lrcMap, ILibraryStore? db, List<TrackRow> toUpsert)
         {
             Library.GetFingerprint(path, out long bytes, out long mtime);
-            TrackRow row = db != null ? db.TryGet(path) : null;
+            TrackRow? row = db != null ? db.TryGet(path) : null;
             if (LibraryDatabase.FingerprintMatches(row, bytes, mtime))
             {
                 // 缓存命中：跳过昂贵的标签解析（ID3/FLAC/M4A/封面）
-                return FromMetadata(path, row.Title, row.Artist, row.Album,
+                return FromMetadata(path, row!.Title, row.Artist, row.Album,
                     TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, lrcMap);
             }
 
@@ -253,7 +253,7 @@ namespace Aurora
         }
 
         /// <summary>全量解析单文件并构建轨道（含 lrc 配对与外部封面兜底）。</summary>
-        public static Track FromPath(string path, Dictionary<string, string> lrcMap)
+        public static Track FromPath(string path, Dictionary<string, string>? lrcMap)
         {
             TrackMetadata meta = TagReaderService.Read(path);
             return FromMetadata(path, meta.Title, meta.Artist, meta.Album,
@@ -262,8 +262,8 @@ namespace Aurora
 
         /// <summary>由元数据（解析所得或缓存复用）构建轨道；lrc 与外部封面兜底每次现读。
         /// readFsExtras=false 时不做任何文件系统访问（零探测快路径，P2 优化）。</summary>
-        public static Track FromMetadata(string path, string title, string artist, string album,
-            TimeSpan duration, byte[] tagCover, Dictionary<string, string> lrcMap, bool readFsExtras = true)
+        public static Track FromMetadata(string path, string? title, string? artist, string? album,
+            TimeSpan duration, byte[]? tagCover, Dictionary<string, string>? lrcMap, bool readFsExtras = true)
         {
             var t = new Track
             {
@@ -290,11 +290,11 @@ namespace Aurora
         }
 
         /// <summary>歌词文件定位与读取：联网匹配缓存优先 → 同名 lrc → xxx.mp3.lrc。</summary>
-        static void ApplyLrc(Track t, Dictionary<string, string> lrcMap)
+        static void ApplyLrc(Track t, Dictionary<string, string>? lrcMap)
         {
             string path = t.FilePath;
             string ext = Path.GetExtension(path).ToLowerInvariant();
-            string lrc = NetMatch.FindLyricFile(path);
+            string? lrc = NetMatch.FindLyricFile(path);
             if (lrc == null && lrcMap != null)
                 lrcMap.TryGetValue(Path.GetFileNameWithoutExtension(path), out lrc);
             if (lrc == null)
@@ -452,7 +452,7 @@ namespace Aurora
         static readonly string Dir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AuroraPlayer");
         static readonly string File_ = Path.Combine(Dir, "settings.ini");
-        static Dictionary<string, string> _kv;
+        static Dictionary<string, string>? _kv;
 
         static Dictionary<string, string> Load()
         {
@@ -473,8 +473,7 @@ namespace Aurora
 
         public static string Get(string key, string def)
         {
-            string v;
-            return Load().TryGetValue(key, out v) ? v : def;
+            return Load().TryGetValue(key, out string? v) ? v! : def;
         }
 
         public static void Set(string key, string val)
@@ -484,7 +483,7 @@ namespace Aurora
             {
                 Directory.CreateDirectory(Dir);
                 var sb = new StringBuilder();
-                foreach (var kv in _kv) sb.Append(kv.Key).Append('=').Append(kv.Value).Append("\r\n");
+                foreach (var kv in _kv!) sb.Append(kv.Key).Append('=').Append(kv.Value).Append("\r\n");
                 File.WriteAllText(File_, sb.ToString());
             }
             catch (Exception ex)

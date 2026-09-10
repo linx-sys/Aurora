@@ -17,7 +17,7 @@ namespace Aurora
         /// 设备级停止回调（真实设备：主动 Stop/Dispose 时触发；
         /// 自然结束走混音器 MixerInputEnded，与此无关）。
         /// </summary>
-        event EventHandler<StoppedEventArgs> PlaybackStopped;
+        event EventHandler<StoppedEventArgs>? PlaybackStopped;
 
         void Play();
         void Pause();

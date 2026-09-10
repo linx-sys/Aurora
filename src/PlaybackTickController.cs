@@ -1,3 +1,4 @@
+#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
 /* ============================================================
  * PlaybackTickController.cs — 进度/黑胶/任务栏 UI 计时（从 MainWindow 拆出）
  * 持有 33ms DispatcherTimer 拉模型：每帧直读 PlayerEngine.Position 直写控件

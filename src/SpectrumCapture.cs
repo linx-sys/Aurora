@@ -12,7 +12,7 @@ namespace Aurora
     internal class SampleCaptureProvider : ISampleProvider
     {
         private readonly ISampleProvider _source;
-        private float[] _lastBuffer;
+        private float[]? _lastBuffer;
         private int _lastCount;
         private readonly object _lock = new object();
 
@@ -40,13 +40,13 @@ namespace Aurora
         }
 
         /// <summary>获取最近一帧的样本数据（线程安全复制）。</summary>
-        public float[] GetLastSamples()
+        public float[]? GetLastSamples()
         {
             lock (_lock)
             {
                 if (_lastCount <= 0) return null;
                 float[] result = new float[_lastCount];
-                Array.Copy(_lastBuffer, result, _lastCount);
+                Array.Copy(_lastBuffer!, result, _lastCount);
                 return result;
             }
         }

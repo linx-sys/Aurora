@@ -21,15 +21,15 @@ namespace Aurora
     /// <summary>tracks 表行（缓存 DTO，与 Track 解耦以便测试）。</summary>
     public class TrackRow
     {
-        public string Path;            // 主键
-        public string FileName;
-        public string Title;
-        public string Artist;
-        public string Album;
+        public string Path = null!;     // 主键
+        public string FileName = null!;
+        public string? Title;
+        public string? Artist;
+        public string? Album;
         public double DurationSeconds; // 0 = 未知
         public long Bytes;             // 指纹之一
         public long LastModified;      // 指纹之二：LastWriteTimeUtc.Ticks
-        public byte[] Cover;           // 标签内嵌封面（可为 null）
+        public byte[]? Cover;           // 标签内嵌封面（可为 null）
         public double? TrackGain;      // ReplayGain 2.0 增益 dB（null=未分析）
         public double? TrackPeak;      // 采样峰值（防削波钳制用）
     }
@@ -42,7 +42,7 @@ namespace Aurora
     public class LibraryDatabase : ILibraryStore
     {
         readonly string _dbPath;
-        SqliteConnection _conn;
+        SqliteConnection? _conn;
         readonly object _lock = new object();
 
         /// <summary>默认库路径：%APPDATA%\AuroraPlayer\library.db。</summary>
@@ -71,13 +71,13 @@ namespace Aurora
             }.ToString());
             _conn.Open();
 
-            using (var cmd = _conn.CreateCommand())
+            using (var cmd = _conn!.CreateCommand())
             {
                 // WAL：后台扫描写 + UI 读不互相阻塞
                 cmd.CommandText = "PRAGMA journal_mode=WAL;";
                 cmd.ExecuteNonQuery();
             }
-            using (var cmd = _conn.CreateCommand())
+            using (var cmd = _conn!.CreateCommand())
             {
                 cmd.CommandText = @"
 CREATE TABLE IF NOT EXISTS tracks (
@@ -96,10 +96,10 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
             }
 
             // 迁移：ReplayGain 列（旧库补列）
-            using (var cmd = _conn.CreateCommand())
+            using (var cmd = _conn!.CreateCommand())
             {
                 cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='track_gain'";
-                long exists = (long)cmd.ExecuteScalar();
+                long exists = Convert.ToInt64(cmd.ExecuteScalar());
                 if (exists == 0)
                 {
                     cmd.CommandText = "ALTER TABLE tracks ADD COLUMN track_gain REAL; ALTER TABLE tracks ADD COLUMN track_peak REAL;";
@@ -109,19 +109,19 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
         }
 
         /// <summary>指纹命中判定：大小与最后写入时间均未变化。</summary>
-        public static bool FingerprintMatches(TrackRow row, long bytes, long lastModifiedUtcTicks)
+        public static bool FingerprintMatches(TrackRow? row, long bytes, long lastModifiedUtcTicks)
         {
             return row != null && row.Bytes == bytes && row.LastModified == lastModifiedUtcTicks;
         }
 
         /// <summary>按路径取缓存行；无缓存返回 null。</summary>
-        public TrackRow TryGet(string path)
+        public TrackRow? TryGet(string path)
         {
             if (string.IsNullOrEmpty(path)) return null;
             lock (_lock)
             {
                 EnsureOpen();
-                using (var cmd = _conn.CreateCommand())
+                using (var cmd = _conn!.CreateCommand())
                 {
                     cmd.CommandText = "SELECT path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak FROM tracks WHERE path=$p";
                     cmd.Parameters.AddWithValue("$p", path);
@@ -142,7 +142,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
             lock (_lock)
             {
                 EnsureOpen();
-                using (var cmd = _conn.CreateCommand())
+                using (var cmd = _conn!.CreateCommand())
                 {
                     // 前缀匹配在 C# 侧做（OrdinalIgnoreCase），SQL 只做范围过滤走索引
                     cmd.CommandText = "SELECT path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak FROM tracks WHERE path >= $lo AND path < $hi";
@@ -164,7 +164,7 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
             lock (_lock)
             {
                 EnsureOpen();
-                using (var cmd = _conn.CreateCommand())
+                using (var cmd = _conn!.CreateCommand())
                 {
                     cmd.CommandText = @"
 INSERT INTO tracks(path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak)
@@ -186,8 +186,8 @@ ON CONFLICT(path) DO UPDATE SET
             lock (_lock)
             {
                 EnsureOpen();
-                using (var tx = _conn.BeginTransaction())
-                using (var cmd = _conn.CreateCommand())
+                using (var tx = _conn!.BeginTransaction())
+                using (var cmd = _conn!.CreateCommand())
                 {
                     cmd.Transaction = tx;
                     cmd.CommandText = @"
@@ -214,15 +214,15 @@ ON CONFLICT(path) DO UPDATE SET
                         if (row == null || string.IsNullOrEmpty(row.Path)) continue;
                         pPath.Value = row.Path;
                         pName.Value = row.FileName ?? "";
-                        pTitle.Value = (object)row.Title ?? DBNull.Value;
-                        pArtist.Value = (object)row.Artist ?? DBNull.Value;
-                        pAlbum.Value = (object)row.Album ?? DBNull.Value;
+                        pTitle.Value = (object?)row.Title ?? DBNull.Value;
+                        pArtist.Value = (object?)row.Artist ?? DBNull.Value;
+                        pAlbum.Value = (object?)row.Album ?? DBNull.Value;
                         pDur.Value = row.DurationSeconds;
                         pBytes.Value = row.Bytes;
                         pMtime.Value = row.LastModified;
-                        pCover.Value = (object)row.Cover ?? DBNull.Value;
-                        pGain.Value = (object)row.TrackGain ?? DBNull.Value;
-                        pPeak.Value = (object)row.TrackPeak ?? DBNull.Value;
+                        pCover.Value = (object?)row.Cover ?? DBNull.Value;
+                        pGain.Value = (object?)row.TrackGain ?? DBNull.Value;
+                        pPeak.Value = (object?)row.TrackPeak ?? DBNull.Value;
                         cmd.ExecuteNonQuery();
                     }
                     tx.Commit();
@@ -237,8 +237,8 @@ ON CONFLICT(path) DO UPDATE SET
             lock (_lock)
             {
                 EnsureOpen();
-                using (var tx = _conn.BeginTransaction())
-                using (var cmd = _conn.CreateCommand())
+                using (var tx = _conn!.BeginTransaction())
+                using (var cmd = _conn!.CreateCommand())
                 {
                     cmd.Transaction = tx;
                     cmd.CommandText = "DELETE FROM tracks WHERE path=$p";
@@ -296,15 +296,15 @@ ON CONFLICT(path) DO UPDATE SET
         {
             cmd.Parameters.AddWithValue("$path", row.Path);
             cmd.Parameters.AddWithValue("$file_name", row.FileName ?? "");
-            cmd.Parameters.AddWithValue("$title", (object)row.Title ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$artist", (object)row.Artist ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$album", (object)row.Album ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$title", (object?)row.Title ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$artist", (object?)row.Artist ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$album", (object?)row.Album ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$duration", row.DurationSeconds);
             cmd.Parameters.AddWithValue("$bytes", row.Bytes);
             cmd.Parameters.AddWithValue("$last_modified", row.LastModified);
-            cmd.Parameters.AddWithValue("$cover", (object)row.Cover ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$track_gain", (object)row.TrackGain ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("$track_peak", (object)row.TrackPeak ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$cover", (object?)row.Cover ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$track_gain", (object?)row.TrackGain ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("$track_peak", (object?)row.TrackPeak ?? DBNull.Value);
         }
     }
 }

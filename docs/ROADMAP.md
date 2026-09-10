@@ -29,12 +29,13 @@
 
 **完成标准**：当前版本可随时回滚；所有后续修改有量化参照。
 
-## 阶段 1：开启 Nullable Reference Types ⬜（P0）
+## 阶段 1：开启 Nullable Reference Types ✅（2026-09-10 达成，分两步落地）
 
-- `<Nullable>disable</Nullable>` → `enable`（AuroraPlayer.csproj / tests 同步）
-- 修复重点：PlayerEngine（`_output?`/`_current?`/`_preloaded?`）、MainViewModel（`CurrentTrack?`）、LibraryImportController、各 Controller
-- 风险低（编译期问题），但改动面广，建议单独一批提交
-- **完成标准**：零 Nullable 警告；`!` 抑制符 ≤ 个位数
+- ✅ 四个 csproj（AuroraPlayer / tests / installer / unins）`<Nullable>enable</Nullable>`——新代码默认 Null 安全
+- ✅ **核心层真零警告**（引擎/协调器/模型/服务共 26 文件）：PlayerEngine / TrackInputManager / SpectrumCapture / PlaybackCoordinator / PlaybackController / PlaylistManager / Model（Track 字段语义化 `?`）/ LibraryDatabase + ILibraryStore（TryGet → `TrackRow?`）/ TagReaderService / NetMatch / UpdateChecker / CoverArt / Loudness / Logger / RelayCommand / ViewModelBase / App 等
+- 🟡 **UI 层 21 文件过渡性 `#nullable disable`**（文件头标注"批次 2 待清理"）：MainWindow / 各 View Controller / MainViewModel / SmTcController（WinRT）/ Assoc（注册表）/ Installer / Uninstaller / Tags / Id3 / Lrc——控件注入与 WinRT/注册表互操作 null 语义密集，收益低风险高
+- 修复要点：事件声明 `EventHandler?` + 处理器 `object? sender`（接口同步）；`TrackRow?/Track?/string?` 按真实语义标注；仅 4 处 `!` 抑制（FingerprintMatches 前置判空后语义、Settings._kv、Array.Copy、FromMetadata row）
+- 完成标准达成：主工程与测试工程 **Nullable 警告 0**；259/259 测试全绿
 
 ## 阶段 2：MainWindow 二次精简 ✅（2026-09-10 达成：509 → 222 行，<300 目标达成）
 

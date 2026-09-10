@@ -13,7 +13,7 @@ namespace Aurora
 {
     static class App
     {
-        static Mutex _instanceMutex;
+        static Mutex? _instanceMutex;
 
         [STAThread]
         static void Main(string[] args)
@@ -38,7 +38,7 @@ namespace Aurora
                 }
             }
 
-            string fileArg = null;
+            string? fileArg = null;
             foreach (string a in args)
             {
                 if (!a.StartsWith("/") && !a.StartsWith("-")) { fileArg = a; break; }
@@ -99,7 +99,7 @@ namespace Aurora
             }
         }
 
-        static void LogCrash(string source, Exception ex)
+        static void LogCrash(string source, Exception? ex)
         {
             try
             {
@@ -112,7 +112,7 @@ namespace Aurora
 
         static void ForwardToRunning(string path)
         {
-            NamedPipeClientStream client = null;
+            NamedPipeClientStream? client = null;
             try
             {
                 client = new NamedPipeClientStream(".", "AuroraPlayer.Instance", PipeDirection.Out);
@@ -150,8 +150,8 @@ namespace Aurora
                 if (list.Count > RecentMax) list.RemoveRange(RecentMax, list.Count - RecentMax);
                 Settings.Set("recentTracks", string.Join("\n", list));
 
-                string exe = null;
-                try { exe = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName; } catch { }
+                string? exe = null;
+                try { exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName; } catch { }
                 if (string.IsNullOrEmpty(exe)) return;
 
                 var jl = new System.Windows.Shell.JumpList();

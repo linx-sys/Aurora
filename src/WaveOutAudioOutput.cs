@@ -10,7 +10,7 @@ namespace Aurora
     {
         readonly WaveOutEvent _waveOut;
 
-        public event EventHandler<StoppedEventArgs> PlaybackStopped;
+        public event EventHandler<StoppedEventArgs>? PlaybackStopped;
 
         public WaveOutAudioOutput(ISampleProvider source)
         {

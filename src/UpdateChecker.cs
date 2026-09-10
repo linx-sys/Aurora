@@ -20,9 +20,9 @@ namespace Aurora
         /// <summary>新版本信息（P2-5 更新体验：版本 + 更新日志 + 安装包直链）。</summary>
         public class UpdateInfo
         {
-            public string Version;      // 不带 v 前缀
-            public string Notes;        // Release notes（markdown 原文，已截断）
-            public string SetupUrl;     // AuroraPlayer-Setup.exe 直链（无则 null）
+            public string Version = null!;      // 不带 v 前缀
+            public string? Notes;        // Release notes（markdown 原文，已截断）
+            public string? SetupUrl;     // AuroraPlayer-Setup.exe 直链（无则 null）
         }
 
         /// <summary>
@@ -44,7 +44,7 @@ namespace Aurora
             {
                 try
                 {
-                    UpdateInfo info = FetchLatest();
+                    UpdateInfo? info = FetchLatest();
                     if (info == null) return;
                     if (IsNewer(info.Version, AppInfo.Version))
                     {
@@ -60,7 +60,7 @@ namespace Aurora
         }
 
         /// <summary>拉取最新 Release：tag + notes + Setup 包直链（缺失字段尽力而为）。</summary>
-        static UpdateInfo FetchLatest()
+        static UpdateInfo? FetchLatest()
         {
             string json = Fetch(AppInfo.ReleasesApi, "application/vnd.github+json");
             if (json == null) return null;

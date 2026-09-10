@@ -171,7 +171,7 @@ namespace Aurora
         }
 
         /// <summary>分析文件（全解码；后台线程调用）。失败返回 null。</summary>
-        public static Result AnalyzeFile(string path)
+        public static Result? AnalyzeFile(string path)
         {
             try
             {

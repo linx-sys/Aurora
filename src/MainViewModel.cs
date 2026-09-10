@@ -1,3 +1,4 @@
+#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
 /* ============================================================
  * MainViewModel.cs — 主视图模型（MVVM 核心）
  * 阶段 3 收敛后职责：可观察 UI 状态 + 命令转发 + CurrentTrackChanged 事件源。

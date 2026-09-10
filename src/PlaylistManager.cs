@@ -119,7 +119,7 @@ namespace Aurora
         }
 
         /// <summary>根据文件路径查找曲目。</summary>
-        public Track FindByPath(string path)
+        public Track? FindByPath(string path)
         {
             if (string.IsNullOrEmpty(path)) return null;
             return Tracks.FirstOrDefault(t =>

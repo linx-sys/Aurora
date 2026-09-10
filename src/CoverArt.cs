@@ -37,12 +37,12 @@ namespace Aurora
         }
 
         /// <summary>轨道封面：内嵌封面优先（缩放到 size），否则程序化生成。</summary>
-        public static ImageSource ForTrack(Track t, int size)
+        public static ImageSource? ForTrack(Track t, int size)
         {
             if (t == null) return null;
             if (t.Cover != null && t.Cover.Length > 64)
             {
-                ImageSource img = FromBytes(t.Cover, size);
+                ImageSource? img = FromBytes(t.Cover, size);
                 if (img != null) return img;
             }
             try { return Generated(t.Title, t.Artist, size); }
@@ -50,7 +50,7 @@ namespace Aurora
         }
 
         /// <summary>内嵌封面字节解码（失败返回 null）。</summary>
-        public static ImageSource FromBytes(byte[] cover, int size)
+        public static ImageSource? FromBytes(byte[] cover, int size)
         {
             if (cover == null || cover.Length <= 64) return null;
             try
@@ -68,20 +68,20 @@ namespace Aurora
         }
 
         /// <summary>黑胶圆心专用：纯图形版（无底部文字，避免圆形裁切）。</summary>
-        public static ImageSource GeneratedPlain(string title, string artist, int size)
+        public static ImageSource? GeneratedPlain(string? title, string? artist, int size)
         {
             try { return GeneratedCore(title, artist, size, false); }
             catch { return null; }
         }
 
         /// <summary>生成封面：对角渐变底 + 歌名首字 + 底部歌曲信息。</summary>
-        public static ImageSource Generated(string title, string artist, int size)
+        public static ImageSource? Generated(string? title, string? artist, int size)
         {
             try { return GeneratedCore(title, artist, size, true); }
             catch { return null; }
         }
 
-        static ImageSource GeneratedCore(string title, string artist, int size, bool withText)
+        static ImageSource? GeneratedCore(string? title, string? artist, int size, bool withText)
         {
             if (string.IsNullOrEmpty(title)) title = "?";
             int idx = Math.Abs(StableHash(title + "|" + (artist ?? ""))) % Palettes.Length;
@@ -145,7 +145,7 @@ namespace Aurora
             return s.Substring(0, 1);
         }
 
-        static string Trim(string s, int max)
+        static string? Trim(string? s, int max)
         {
             s = (s ?? "").Trim();
             if (s.Length == 0) return "未知歌手";

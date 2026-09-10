@@ -28,7 +28,7 @@ namespace Aurora
                             server.WaitForConnection();
                             using (var reader = new StreamReader(server, Encoding.Unicode))
                             {
-                                string path = reader.ReadLine();
+                                string? path = reader.ReadLine();
                                 if (!string.IsNullOrEmpty(path) && File.Exists(path) && onFileReceived != null)
                                 {
                                     onFileReceived(path);

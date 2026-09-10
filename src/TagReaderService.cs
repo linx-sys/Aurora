@@ -12,10 +12,10 @@ namespace Aurora
     /// <summary>统一的轨道元数据模型。</summary>
     public class TrackMetadata
     {
-        public string Title;
-        public string Artist;
-        public string Album;
-        public byte[] Cover;
+        public string? Title;
+        public string? Artist;
+        public string? Album;
+        public byte[]? Cover;
         public TimeSpan? Duration;
     }
 
@@ -73,7 +73,7 @@ namespace Aurora
             }
 
             // 先解析文件名推断（不直接写入 meta）："NN - Artist - Title" / "Artist - Title" / "Artist-Title"
-            string fnameArtist, fnameTitle;
+            string? fnameArtist, fnameTitle;
             ParseFilename(path, out fnameArtist, out fnameTitle);
 
             // 智能识别下载器占位标签（title=artist=album=kuwo 等）→ 置空，
@@ -99,7 +99,7 @@ namespace Aurora
         /// 解析文件名推断歌手与标题（不写入 meta，由调用方决定是否采用）：
         /// "NN - Artist - Title" / "Artist - Title" / "Artist-Title"。
         /// </summary>
-        static void ParseFilename(string path, out string artist, out string title)
+        static void ParseFilename(string path, out string? artist, out string title)
         {
             string baseName = Path.GetFileNameWithoutExtension(path).Trim();
             string stripped = Regex.Replace(baseName, @"^\s*\d{1,3}\s*[-._)]\s*", "");
@@ -136,7 +136,7 @@ namespace Aurora
         }
 
         /// <summary>识别并清除下载器写入的占位标签（如 kuwo、qq 等）。</summary>
-        static void SanitizePlaceholderTags(TrackMetadata meta, string fnameArtist)
+        static void SanitizePlaceholderTags(TrackMetadata meta, string? fnameArtist)
         {
             bool junkTag = !string.IsNullOrWhiteSpace(meta.Title) &&
                            (IsJunkTagText(meta.Title) ||

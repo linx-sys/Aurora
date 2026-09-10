@@ -1,3 +1,4 @@
+#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
 /* ============================================================
  * NetMatchSettingsDialog.cs — 联网匹配设置对话框
  * 从 MainWindow.cs 拆出（原属"文件关联相关 UI/对话框"职责）。

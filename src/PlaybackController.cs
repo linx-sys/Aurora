@@ -27,7 +27,7 @@ namespace Aurora
         /// 获取下一首曲目（播放结束自动触发时使用）。
         /// 单曲循环模式返回 null（调用方应重新播放当前曲目）。
         /// </summary>
-        public Track GetNextForAuto(IList<Track> tracks, Track current)
+        public Track? GetNextForAuto(IList<Track> tracks, Track? current)
         {
             if (tracks == null || tracks.Count == 0) return null;
             if (Mode == PlayMode.SingleRepeat) return null; // 单曲循环由调用方处理
@@ -38,14 +38,14 @@ namespace Aurora
         /// 获取下一首曲目（用户手动点击下一首时使用）。
         /// 单曲循环模式也会切到下一首。
         /// </summary>
-        public Track GetNextForManual(IList<Track> tracks, Track current)
+        public Track? GetNextForManual(IList<Track> tracks, Track? current)
         {
             if (tracks == null || tracks.Count == 0) return null;
             return GetNextInternal(tracks, current);
         }
 
         /// <summary>获取上一首曲目（非随机模式：列表序号回退）。</summary>
-        public Track GetPrev(IList<Track> tracks, Track current)
+        public Track? GetPrev(IList<Track> tracks, Track? current)
         {
             if (tracks == null || tracks.Count == 0) return null;
             int idx = current != null ? tracks.IndexOf(current) : 0;
@@ -54,7 +54,7 @@ namespace Aurora
         }
 
         /// <summary>随机模式：回退播放轨迹。无可回退返回 false（调用方走列表回退）。</summary>
-        public bool TryGetShufflePrev(out Track prev)
+        public bool TryGetShufflePrev(out Track? prev)
         {
             prev = null;
             if (Mode != PlayMode.Shuffle || _shufflePos <= 0) return false;
@@ -63,7 +63,7 @@ namespace Aurora
         }
 
         /// <summary>随机模式：沿轨迹前进（"下一首"优先重播回退过的歌）。无可前进返回 false。</summary>
-        public bool TryGetShuffleNext(out Track next)
+        public bool TryGetShuffleNext(out Track? next)
         {
             next = null;
             if (Mode != PlayMode.Shuffle || _shufflePos >= _shuffleHistory.Count - 1) return false;
@@ -101,7 +101,7 @@ namespace Aurora
             _shufflePos = -1;
         }
 
-        private Track GetNextInternal(IList<Track> tracks, Track current)
+        private Track? GetNextInternal(IList<Track> tracks, Track? current)
         {
             if (Mode == PlayMode.Shuffle)
             {

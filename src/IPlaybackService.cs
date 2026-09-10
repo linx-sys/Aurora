@@ -25,7 +25,7 @@ namespace Aurora
         long SessionId { get; }
 
         /// <summary>当前加载的文件路径（无则为 null）。</summary>
-        string CurrentPath { get; }
+        string? CurrentPath { get; }
 
         /// <summary>加载曲目（失败返回 false，如解码异常）；成功后位于起点，未自动播放。</summary>
         bool Load(string path);
@@ -47,9 +47,9 @@ namespace Aurora
         void SetReplayGain(float linear);
 
         /// <summary>播放状态变更（后台线程触发，订阅方自行切 UI 线程）。</summary>
-        event EventHandler<PlaybackStateChangedEventArgs> StateChanged;
+        event EventHandler<PlaybackStateChangedEventArgs>? StateChanged;
 
         /// <summary>自然结束（携带会话 ID，供订阅方过滤过期事件）。</summary>
-        event EventHandler<PlaybackEndedEventArgs> PlaybackEnded;
+        event EventHandler<PlaybackEndedEventArgs>? PlaybackEnded;
     }
 }
