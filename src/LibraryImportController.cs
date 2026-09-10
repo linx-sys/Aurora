@@ -63,11 +63,13 @@ namespace Aurora
             string auto = autoPlayPath;
             ThreadPool.QueueUserWorkItem(_ =>
             {
-                // ① DB 秒开（有缓存行时几乎瞬时出列表；已消失文件被跳过）
+                // ① DB 秒开（有缓存行时几乎瞬时出列表）。零探测快路径：
+                //    不做存在性/lrc/外部封面探测（超大库逐文件探测是启动瓶颈）——
+                //    已删文件成为短命幽灵行、lrc 与外部封面由 ② 权威同步补齐
                 List<TrackRow> cached = store.GetByPrefix(d);
                 if (cached.Count > 0)
                 {
-                    List<Track> quick = Library.BuildTracksFromRows(cached);
+                    List<Track> quick = Library.BuildTracksFromRows(cached, probeExtras: false);
                     if (quick.Count > 0)
                     {
                         win.Dispatcher.BeginInvoke((Action)(() =>

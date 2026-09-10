@@ -31,11 +31,12 @@
 ## 两段式启动同步（LibraryImportController.LoadDirectory）
 
 ```
-① DB 秒开：GetByPrefix(lastDir) → Library.BuildTracksFromRows（O(n) 物化；
-   每行同名 .lrc 探测 + 外部封面兜底现读；已消失文件跳过）→ ReplaceTracks 填充列表
+① DB 秒开（零探测快路径）：GetByPrefix(lastDir) → Library.BuildTracksFromRows(probeExtras:false)
+   → ReplaceTracks 填充列表。不做任何文件系统调用（28ms/10k 首，见 PERF_BASELINE）；
+   代价：已删文件短暂成为幽灵行、lrc/外部封面暂缺——均由 ② 补齐
 ② 差分同步（权威）：EnumerateFiles → BuildTracksIncremental
    （指纹命中→复用；变化→重解析并 UpsertMany；消失→DeleteMissingUnder 清理）
-   → ReplaceTracks 整表替换 + 播放状态恢复（lastDir/lastTrack）
+   → ReplaceTracks 整表替换（lrc/外部封面完整）+ 播放状态恢复（lastDir/lastTrack）
 ```
 
 ## 缓存规避规则（重要）

@@ -100,6 +100,25 @@ namespace Aurora.Tests
             Assert.Contains("测试", tracks[0].LrcText);
         }
 
+        // ---------- 零探测快路径（P2 优化，启动 ① 使用） ----------
+
+        [Fact]
+        public void FromRows_Fast_KeepsGhostRows_AndSkipsLrc()
+        {
+            string f = WriteFake("song.mp3");
+            File.WriteAllText(Path.Combine(root, "song.lrc"), "[00:01.00]测试");
+            Db.Upsert(Row(f, "song"));
+            Db.Upsert(Row(Path.Combine(root, "gone.mp3"), "已删除"));   // 文件不存在
+
+            var tracks = Library.BuildTracksFromRows(Db.GetByPrefix(root), probeExtras: false);
+
+            // 快路径不查存在性：幽灵行保留（由随后的差分同步清理）；不做 lrc 探测
+            Assert.Equal(2, tracks.Count);
+            var song = tracks.Single(t => t.Title == "song");
+            Assert.Null(song.LrcText);
+            Assert.Equal(f, song.FilePath);
+        }
+
         // ---------- 差分同步：新增/变更/清理/边界 ----------
 
         [Fact]

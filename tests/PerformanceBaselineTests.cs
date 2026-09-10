@@ -118,5 +118,23 @@ namespace Aurora.Tests
             output.WriteLine("[Perf] 差分同步 1000 首（热缓存，指纹全命中）: " + sw.ElapsedMilliseconds + " ms");
             Assert.Equal(1000, built.Count);
         }
+
+        [Fact]
+        [Trait("Category", "Perf")]
+        public void Bench_DbFirstMaterializeFast_10kRows()
+        {
+            // 零探测快路径：行指向不存在文件也可物化（不做任何文件系统调用）
+            var rows = Enumerable.Range(0, 10000).Select(i => Row(@"Z:\M\f" + i + ".mp3")).ToList();
+            Db.UpsertMany(rows);
+            Library.BuildTracksFromRows(Db.GetByPrefix(@"Z:\M"), probeExtras: false);   // 预热
+
+            var sw = Stopwatch.StartNew();
+            var got = Db.GetByPrefix(@"Z:\M");
+            var tracks = Library.BuildTracksFromRows(got, probeExtras: false);
+            sw.Stop();
+
+            output.WriteLine("[Perf] DB 秒开快路径 10k 首（GetByPrefix+零探测物化）: " + sw.ElapsedMilliseconds + " ms");
+            Assert.Equal(10000, tracks.Count);
+        }
     }
 }

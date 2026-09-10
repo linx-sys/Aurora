@@ -178,15 +178,30 @@ namespace Aurora
 
         /// <summary>
         /// DB 优先秒开（P1-3）：由库行直接物化 Track，启动时无需等扫描。
-        /// 每行做一次同名 .lrc 探测与外部封面兜底（现读，规则与扫描期一致）；
-        /// 已消失的文件跳过（等后台差分同步清理 DB 行）。
+        /// <paramref name="probeExtras"/> = true（默认）：逐文件探测（存在性 + 同名 lrc + 外部封面兜底），
+        /// 数据完整但每首 3~5 次文件系统调用，超大库慢——供测试/小库使用。
+        /// = false：零探测快路径（P2 优化，启动 ① 用）——不查存在性（已删文件成为短命幽灵行，
+        /// 由随后的差分同步清理）、不读 lrc/外部封面（由 ② 权威同步补齐），仅 DB 内数据。
         /// </summary>
-        public static List<Track> BuildTracksFromRows(IEnumerable<TrackRow> rows)
+        public static List<Track> BuildTracksFromRows(IEnumerable<TrackRow> rows, bool probeExtras = true)
         {
             var result = new List<Track>();
             foreach (TrackRow row in rows)
             {
-                if (row == null || string.IsNullOrEmpty(row.Path) || !File.Exists(row.Path)) continue;
+                if (row == null || string.IsNullOrEmpty(row.Path)) continue;
+
+                if (!probeExtras)
+                {
+                    try
+                    {
+                        result.Add(FromMetadata(row.Path, row.Title, row.Artist, row.Album,
+                            TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, null, readFsExtras: false));
+                    }
+                    catch { }
+                    continue;
+                }
+
+                if (!File.Exists(row.Path)) continue;   // 已消失：等后台差分同步清理 DB 行
                 var lrcMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 // 同名 lrc 探测：xxx.lrc 优先，其次 xxx.mp3.lrc（与扫描期配对规则一致）
                 string baseName = Path.Combine(Path.GetDirectoryName(row.Path), Path.GetFileNameWithoutExtension(row.Path));
@@ -245,16 +260,17 @@ namespace Aurora
                 meta.Duration ?? TimeSpan.Zero, meta.Cover, lrcMap);
         }
 
-        /// <summary>由元数据（解析所得或缓存复用）构建轨道；lrc 与外部封面兜底每次现读。</summary>
+        /// <summary>由元数据（解析所得或缓存复用）构建轨道；lrc 与外部封面兜底每次现读。
+        /// readFsExtras=false 时不做任何文件系统访问（零探测快路径，P2 优化）。</summary>
         public static Track FromMetadata(string path, string title, string artist, string album,
-            TimeSpan duration, byte[] tagCover, Dictionary<string, string> lrcMap)
+            TimeSpan duration, byte[] tagCover, Dictionary<string, string> lrcMap, bool readFsExtras = true)
         {
             var t = new Track
             {
                 FilePath = path,
                 FileName = Path.GetFileName(path),
             };
-            try { t.Bytes = new FileInfo(path).Length; } catch { }
+            if (readFsExtras) { try { t.Bytes = new FileInfo(path).Length; } catch { } }
 
             t.Title = title;
             t.Artist = artist;
@@ -263,13 +279,13 @@ namespace Aurora
             if (duration > TimeSpan.Zero) t.Duration = duration;
             string ext = Path.GetExtension(path).ToLowerInvariant();
 
-            ApplyLrc(t, lrcMap);
+            if (readFsExtras) ApplyLrc(t, lrcMap);
 
             if (t.Artist == null) t.Artist = "";
             if (t.Album == null) t.Album = "";
 
             // 外部封面兜底：缓存目录优先，同目录 .jpg 向后兼容
-            ApplyExternalCoverFallback(t);
+            if (readFsExtras) ApplyExternalCoverFallback(t);
             return t;
         }
 

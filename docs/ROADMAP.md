@@ -78,6 +78,8 @@
 - ✅ SQLite 为正式核心存储（ILibraryStore，WAL）
 - ✅ 启动流程"SQLite 立即显示 → 后台扫描差分 → 更新库"（LibraryImportController 两段式）
 - ✅ 增量扫描（LibraryScanner 语义 = Library.BuildTracksIncremental：指纹命中跳过/变化重解析/消失清理）
+- ✅ **超大库秒开达标（2026-09-10 优化）**：物化改零探测快路径，10k 首 28ms（PERF_BASELINE 实测），外推 100k 首 <1s
+- ⬜ 剩余：合成大库端到端验证（构造 10 万行 DB + GUI 实测）；快路径代价已文档化（幽灵行/歌词封面由同步补齐）
 
 剩余（按需推进，非必需）：
 - ⬜ 扩展列：Genre / Bitrate / SampleRate（TagReaderService 已有部分数据，加列+迁移即可）
