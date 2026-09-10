@@ -40,8 +40,6 @@ namespace Aurora
         SmTcController SmTc;                     // 系统媒体传输控制（可 null：初始化失败静默禁用）
         PlaybackStateViewController StateView;   // 播放状态/音量/曲目信息/切歌编排
 
-        TextBlock FpTitle;                       // StateView 需要先于自身构造获取的控件
-
         public MainWindow(string openFile)
         {
             /* ---------- 1. Initialize ---------- */
@@ -164,7 +162,9 @@ namespace Aurora
             Hotkey = new HotkeyController(Win, ViewModel, Player,
                 isListOpen: () => PlaylistView.IsOpen,
                 toggleList: () => PlaylistView.Toggle(),
-                showVolumePopup: StateView.ShowVolumePopupTemporarily);
+                // 注意：必须用 lambda 延迟解析——StateView 在最后才构造，
+                // 直接绑定实例方法组会因 null this 抛 ArgumentException（启动崩溃）
+                showVolumePopup: () => StateView.ShowVolumePopupTemporarily());
 
             // 33ms 进度/黑胶/任务栏计时（含进度条拖动交互）
             Tick = new PlaybackTickController(Win, ViewModel, Player, Lyrics,
@@ -184,7 +184,7 @@ namespace Aurora
 
             // 播放状态视图控制（图标/音量/曲目信息/切歌编排）最后装配
             StateView = new PlaybackStateViewController(Win, root, ViewModel,
-                FpTitle, F<TextBlock>("FpArtist"), F<System.Windows.Shapes.Rectangle>("FpTitleBar"),
+                F<TextBlock>("FpTitle"), F<TextBlock>("FpArtist"), F<System.Windows.Shapes.Rectangle>("FpTitleBar"),
                 F<StackPanel>("FpLyricsPanel"),
                 F<System.Windows.Shapes.Ellipse>("VinylDisc"), F<ImageBrush>("VinylCover"),
                 F<RotateTransform>("ArmRotate"), F<Button>("BtnPlay"),
