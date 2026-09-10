@@ -2,7 +2,7 @@
 
 所有重要变更记录于此。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
-## [未发布]（develop 分支，目标 3.0）
+## [3.0.0] - 2026-09-10
 
 ### 架构
 - MainWindow 909 → 222 行：职责收敛为装配根 + 参数处理 + 生命周期；Toast/进度计时/快捷键/联网匹配/窗口杂项/播放状态 UI/命令接线拆分为独立 Controller
