@@ -55,6 +55,7 @@
     <Compile Include="src\MainViewModel.cs" />
     <Compile Include="src\VorbisWaveReader.cs" />
     <Compile Include="src\OpusWaveReader.cs" />
+    <Compile Include="src\PlaybackCoordinator.cs" />
     <Compile Include="src\PlaybackController.cs" />
     <Compile Include="src\PlaylistManager.cs" />
     <Compile Include="src\AudioDecoders.cs" />

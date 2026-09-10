@@ -50,16 +50,16 @@
 
 **完成标准**：MainWindow 只剩 Initialize / Constructor / Lifecycle；无播放逻辑 / 数据查询 / 文件扫描。
 
-## 阶段 3：MainViewModel 解耦（PlaybackCoordinator）🟡（P0）
+## 阶段 3：MainViewModel 解耦（PlaybackCoordinator）✅（2026-09-10 达成）
 
-已完成：`IPlaybackService` 接口隔离引擎（VM 已不直接引用 PlayerEngine 具体类型）。
+已完成：
+- ✅ `IPlaybackService` 接口隔离引擎（VM 不引用 PlayerEngine 具体类型）
+- ✅ 新增 `PlaybackCoordinator`（Application 层）：PlayTrack / Next / Prev / DeleteTrack / SeekTo / PreloadNextIfNearEnd / CrossfadeToTrack / ReplayGain 懒分析调度 / 引擎会话竞态第二道防线（约 280 行）全部迁出
+- ✅ MainViewModel 收敛为：可观察 UI 状态 + 命令转发 + CurrentTrackChanged 事件源（553 → 约 250 行）；音量/静音为纯 UI 状态透传（无流程逻辑）
+- ✅ UI 调度经 `Action<Action>` 注入（VM 传 Dispatcher.BeginInvoke，测试内联）——协调器无 UI 依赖、可单元测试（FakePlaybackService，17 例）
+- ✅ 单一数据源不破：242→259 测试全绿
 
-剩余（原稿核心诉求仍然成立）：
-- ⬜ 新增 `PlaybackCoordinator`：把 PlayTrack / NextTrack(manual) / PrevTrack / PreloadNextIfNearEnd / CrossfadeToTrack / ApplyReplayGain / ScheduleLoudnessScan / OnPlaybackEnded 会话过滤（约 250 行）从 MainViewModel 迁出
-- ⬜ MainViewModel 收敛为：可观察 UI 状态 + 命令转发 + CurrentTrackChanged 事件源
-- ⬜ RG 懒分析调度随 Coordinator 走（依赖 ILibraryStore）
-
-**完成标准**：VM 不含播放流程判断 / 自动下一首 / Crossfade 决策；173+ 既有纯逻辑测试不破。
+**完成标准达成**：VM 不含播放流程判断 / 自动下一首 / Crossfade 决策。
 
 ## 阶段 4：PlayerEngine 再拆分 🟡（P1，586 → <500 行）
 

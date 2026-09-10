@@ -34,11 +34,19 @@
 │    SmTcController          SMTC 媒体键/系统媒体浮层  │
 │    UiUtil                  拖条/淡入/格式化静态助手   │
 ├────────────────────────────────────────────────────┤
+│ Application 层                                      │
+│  • PlaybackCoordinator  唯一播放业务入口：PlayTrack/ │
+│    Next/Prev/Delete/Seek/预载决策/跨淡决策/ReplayGain│
+│    懒分析调度/引擎会话竞态第二道防线；UI 调度经      │
+│    Action<Action> 注入（无 UI 类型依赖，可单测）     │
+├────────────────────────────────────────────────────┤
 │ ViewModel 层                                        │
-│  • MainViewModel     协调器（经 IPlaybackService /  │
-│                       ILibraryStore 接口交互；搜索  │
-│                       防抖 200ms）                  │
-│  • PlaybackController 播放模式状态机（纯逻辑可测试） │
+│  • MainViewModel     可观察 UI 状态 + 命令转发 +    │
+│                       CurrentTrackChanged 事件源；  │
+│                       播放操作全部转发协调器；       │
+│                       搜索防抖 200ms                │
+│  • PlaybackController 播放模式状态机（纯逻辑可测试， │
+│                       由 Coordinator 持有）          │
 │  • PlaylistManager   Tracks/View 双集合 + 批量刷新  │
 ├────────────────────────────────────────────────────┤
 │ Service 层                                          │
