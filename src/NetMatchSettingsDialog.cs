@@ -43,6 +43,36 @@ namespace Aurora
 
             var root = new StackPanel { Margin = new Thickness(20) };
 
+            // ===== 数据源（阶段 9）：Provider 级启停，注册表按序降级 =====
+            root.Children.Add(new TextBlock
+            {
+                Text = "数据源（按序尝试，单源失效自动降级）：",
+                Foreground = dimBrush,
+                FontSize = 12,
+                Margin = new Thickness(0, 0, 0, 6),
+            });
+            foreach (ILyricsProvider provider in NetMatch.Providers)
+            {
+                string pKey = NetMatch.SettingsKeyForProvider(provider);
+                var pcb = new CheckBox
+                {
+                    Content = provider.Name,
+                    IsChecked = Settings.Get(pKey, "1") != "0",
+                    Foreground = textBrush,
+                    Margin = new Thickness(4, 2, 4, 2),
+                };
+                pcb.Checked += (s, e) => Settings.Set(pKey, "1");
+                pcb.Unchecked += (s, e) => Settings.Set(pKey, "0");
+                root.Children.Add(pcb);
+            }
+
+            root.Children.Add(new Separator
+            {
+                Background = dimBrush,
+                Opacity = 0.3,
+                Margin = new Thickness(0, 10, 0, 12),
+            });
+
             root.Children.Add(new TextBlock
             {
                 Text = "播放缺少歌词 / 封面的歌曲时，自动联网匹配并缓存到本地。\n按音频格式选择是否启用：",

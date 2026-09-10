@@ -44,6 +44,19 @@ namespace Aurora
          * ============================================================ */
 
         const string ExtEnabledPrefix = "netmatch.ext.";   // settings.ini 键前缀，值 "1"/"0"，默认启用
+        const string ProviderEnabledPrefix = "netmatch.provider.";   // 数据源级开关（阶段 9），默认启用
+
+        /// <summary>某数据源对应的设置键（如 netmatch.provider.酷狗）。</summary>
+        public static string SettingsKeyForProvider(ILyricsProvider p)
+        {
+            return ProviderEnabledPrefix + p.Name;
+        }
+
+        /// <summary>某数据源是否启用（设置读取，默认全部启用；禁用后编排直接跳过该源）。</summary>
+        public static bool ProviderEnabled(ILyricsProvider p)
+        {
+            return Settings.Get(SettingsKeyForProvider(p), "1") != "0";
+        }
 
         /// <summary>某扩展名对应的设置键（如 netmatch.ext.mp3）。</summary>
         public static string SettingsKeyForExt(string ext)
@@ -222,6 +235,7 @@ namespace Aurora
                     string? lastError = null;
                     foreach (ILyricsProvider provider in Providers)
                     {
+                        if (!ProviderEnabled(provider)) continue;   // 数据源级开关（阶段 9）：禁用源直接跳过
                         try
                         {
                             if (provider.Match(r, musicPath, title, artist))

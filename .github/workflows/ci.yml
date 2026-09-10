@@ -63,6 +63,8 @@ jobs:
           Copy-Item win-x64/publish/AuroraPlayer-Setup.exe dist/AuroraPlayer-Setup.exe -Force
           Copy-Item win-x64/portable/AuroraPlayer.exe dist/Aurora-x64-Portable.exe -Force
           Compress-Archive -Path build/* -DestinationPath dist/Aurora-win64.zip -Force
+          # symbols（阶段 11）：PDB 调试符号包，崩溃堆栈翻译用
+          Get-ChildItem build -Filter *.pdb | Compress-Archive -DestinationPath dist/Aurora-symbols.zip -Force
           Get-ChildItem dist
 
       - name: Create GitHub Release
@@ -73,4 +75,5 @@ jobs:
             dist/AuroraPlayer-Setup.exe
             dist/Aurora-x64-Portable.exe
             dist/Aurora-win64.zip
+            dist/Aurora-symbols.zip
           generate_release_notes: true

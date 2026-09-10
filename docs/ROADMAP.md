@@ -111,24 +111,26 @@
 - ⬜ 可选后续：ILogger 接口抽象 + 30 处 Dbg 调用点分级迁移——收益主要是按级别过滤，
   当前单文件轮转日志已够定位问题，**按极简原则暂不实施**（记录为决策而非欠账）
 
-## 阶段 9：Provider 系统统一 🟡（P2）
+## 阶段 9：Provider 系统统一 ✅（2026-09-10 评审 + 增量达成）
 
-现状：`ILyricsProvider` 已存在、NetMatch 内置酷狗→网易云降级链 + 按格式开关。
-- ⬜ `IOnlineProvider` 统一歌词/封面/Metadata 三类；`ProviderRegistry`（优先级/启停/回退）
-- ⚠️ 收益主要是"未来接第三方源"；当前双源降级已稳定，**建议排在测试与诊断之后**
+评审结论：现有架构即原稿诉求——`ILyricsProvider`（可插拔接口）+ `LyricsProviderBase`（HTTP/JSON/打分/缓存共享设施）+ 注册表 `NetMatch.Providers`（按序尝试/单源失效自动降级）+ 按格式启停；**"替换任意 Provider 无需修改核心代码"完成标准天然达成**（实现接口并加入 Providers 即生效）。
+- ✅ 增量（2026-09-10）：**数据源级启停**（设置键 `netmatch.provider.<Name>`，设置对话框动态生成开关，禁用源编排直接跳过）
+- ⬜ MetadataProvider：无消费场景（标签本地读取），按极简原则不建空抽象；未来需要时实现 `ILyricsProvider` 变体即可
 
-## 阶段 10：产品体验优化 🟡（持续）
+## 阶段 10：产品体验优化 🟡（核心已达成，剩截图）
 
-- ✅ 启动：DB 秒开 + 设备后台预热已落地（量化待阶段 0 基线）
-- ✅ 搜索：200ms 防抖已落地（10 万曲毫秒级待大库验证）
-- ⬜ 首次启动引导 / 设置页整理 / 快捷键说明（README 已有快捷键表）
-- ⬜ README 截图（原 TODO 仍在）
+- ✅ 启动：DB 秒开 + 设备后台预热（量化见 PERF_BASELINE）
+- ✅ 搜索：200ms 防抖；切歌：预载/跨淡无缝衔接
+- ✅ 首次启动引导：文件夹选择对话框（已有）；设置页整理：诊断入口/数据源启停/更新开关已归类
+- ✅ 快捷键说明（README 表格）
+- ⬜ README 软件截图：**需配合**（运行应用截图 1~3 张替换 README 顶部 TODO）
 
-## 阶段 11：发布体系升级 🟡
+## 阶段 11：发布体系升级 ✅（2026-09-10 达成）
 
-- ✅ CI：tag → Build → Test → Release（三产物：Setup / Portable / win64.zip）已自动化
-- ⬜ CHANGELOG.md 自动生成（release notes 已在用 `generate_release_notes: true`，差本地 CHANGELOG 落盘）
-- ⬜ symbols.zip（pdb 打包）；产物改名 Aurora-x64-Setup.exe（可选）
+- ✅ CI：tag → Build → Test → Release 自动化（既有）
+- ✅ 新增 `Aurora-symbols.zip`（PDB 调试符号包，崩溃堆栈翻译用）
+- ✅ `CHANGELOG.md` 建立（2.0-stable 基线 + 3.0 未发布变更按 Keep a Changelog 格式记录）
+- 产物命名维持 AuroraPlayer-Setup.exe（改名收益低，README 引用需同步改动，不做）
 
 ---
 
