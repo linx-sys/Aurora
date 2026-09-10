@@ -396,7 +396,7 @@ namespace Aurora
             ThreadPool.QueueUserWorkItem(_ =>
             {
                 WaveStream reader = null;
-                try { reader = AudioDecoders.Open(path); }
+                try { reader = _decoder(path); }
                 catch { reader = null; }
                 lock (_lock)
                 {

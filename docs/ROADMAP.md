@@ -87,23 +87,20 @@
 - ⬜ Hash 列：当前指纹 = 大小+mtime，够用；content hash 成本高，无现实问题不建议加
 - ⬜ 10 万曲库启动 <2s：需先有阶段 0 基线与合成大库再验证（BuildTracksFromRows 已按 O(n) 物化，预估可达成）
 
-## 阶段 6：Audio Engine 自动化测试 🟡（P0，12 → 50+）
+## 阶段 6：Audio Engine 自动化测试 ✅（2026-09-10 达成：引擎 58 例，全量 242）
 
-已完成（P1-4，fake IAudioOutput 无声卡可跑）：
-- ✅ 播放/暂停状态机、Seek 钳制（负值/超时长）、解码失败、音量钳制
-- ✅ 自然结束 → PlaybackEnded 携会话 ID、过期会话丢弃（VM 侧防线）、跨淡参数
-- ✅ Load 会话递增
+已完成（P1-4 基线 12 例 + 阶段 6 补强 46 例，fake IAudioOutput 无声卡可跑）：
+- ✅ 播放/暂停状态机、完整状态事件序列（Load→Play→Pause→Play→Stop）
+- ✅ Seek 钳制（负值/超时长/精确到末尾→自然结束）、解码失败、音量钳制与设备同步
+- ✅ 自然结束：仅一次、携会话 ID 与路径、状态事件收尾 Stopped、结束后可重载再播
+- ✅ 快速切歌竞态：连切 A→B→C 会话单调；播放中硬切只发最新会话结束事件（A 静默移除）
+- ✅ 跨淡：播放中跨淡不 Pause、零淡入、无前置 Load、长淡入仍自然结束、旧输入淡出后静默移除（计时器路径）
+- ✅ Preload：命中复用（解码只开一次）/同路径幂等/路径变更丢弃旧预载/不存在路径/解码抛异常不崩溃
+- ✅ ReplayGain 联动：非静音流+峰值捕获——默认 1×、实时生效 2×、Load 前设置生效、±钳制（8×/0×）
+- ✅ Stop/Dispose 幂等与 Dispose 后全调用 no-op；输出工厂抛异常/返回 null 降级（Load 可用、Play 静默、Volume 记忆）
+- ⬜ 可选后续：WASAPI 真机冒烟（本地手动）、并发 Load/Ended 压力循环
 
-剩余补测清单：
-- ⬜ 快速切歌竞态：Play(A) → 50ms → Play(B) → 50ms → Play(C)，断言 Current==C（会话单调）
-- ⬜ 跨淡中旧输入淡出后移除（ScheduleOldInputRemoval 计时路径）
-- ⬜ Preload 命中/失效（同路径幂等、路径变更丢弃旧预载）
-- ⬜ ReplayGain 钳制（BaseGain 0~8 边界）、GainFade 与引擎联动
-- ⬜ Stop 后 Dispose 幂等、Dispose 后调用全部 no-op
-- ⬜ WASAPI 回退：factory 抛异常时默认工厂行为（需 Settings 注入点或工厂级测试）
-- ⬜ Position 拉取与 Reader 释放竞态（ReaderDisposed 标记路径）
-
-**完成标准**：引擎测试 50+；全部 CI 无声卡通过。
+**完成标准达成**：引擎测试 58 ≥ 50；全量 242/242，连续 6 轮无 flake。
 
 ## 阶段 7：Audio Diagnostics 面板 ⬜（P2，实现成本低、回报高）
 

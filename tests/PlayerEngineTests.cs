@@ -13,13 +13,18 @@ using Xunit;
 
 namespace Aurora.Tests
 {
-    /// <summary>模拟解码流：48kHz stereo float，静音数据，可 Seek，有限时长。</summary>
+    /// <summary>模拟解码流：48kHz stereo float，可 Seek，有限时长；amplitude>0 时输出非静音样本（ReplayGain 联动测试用）。</summary>
     class FakeWaveStream : WaveStream
     {
         readonly WaveFormat fmt = WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
+        readonly float amplitude;
         long pos;
 
-        public FakeWaveStream(double seconds) { TotalTimeSeconds = seconds; }
+        public FakeWaveStream(double seconds, float amplitude = 0f)
+        {
+            TotalTimeSeconds = seconds;
+            this.amplitude = amplitude;
+        }
 
         public double TotalTimeSeconds { get; set; }
 
@@ -35,16 +40,29 @@ namespace Aurora.Tests
         {
             long remaining = Length - pos;
             int n = (int)Math.Min(count, remaining);
-            pos += n;   // 静音数据，无需填充
+            if (amplitude > 0)
+            {
+                byte[] sample = BitConverter.GetBytes(amplitude);
+                for (int i = 0; i + 4 <= n; i += 4)
+                {
+                    buffer[offset + i] = sample[0];
+                    buffer[offset + i + 1] = sample[1];
+                    buffer[offset + i + 2] = sample[2];
+                    buffer[offset + i + 3] = sample[3];
+                }
+            }
+            pos += n;
             return n;
         }
     }
 
-    /// <summary>模拟输出设备：Play 时后台线程从混音器拉样本（真实设备的行为模型）。</summary>
+    /// <summary>模拟输出设备：Play 时后台线程从混音器拉样本（真实设备的行为模型）；记录峰值供增益联动断言。</summary>
     class FakeAudioOutput : IAudioOutput
     {
         public ISampleProvider Source;
         public int PlayCount, PauseCount, StopCount;
+        public float Peak;                       // 已拉取样本的最大绝对幅值
+        readonly object peakLock = new object();
         public float Volume { get; set; } = 1f;
         Thread puller;
         volatile bool pulling;
@@ -59,6 +77,10 @@ namespace Aurora.Tests
             puller.Start();
         }
 
+        public void ResetPeak() { lock (peakLock) { Peak = 0; } }
+
+        public float GetPeak() { lock (peakLock) { return Peak; } }
+
         void PullLoop()
         {
             var buf = new float[4096];
@@ -68,6 +90,14 @@ namespace Aurora.Tests
                 try { n = Source != null ? Source.Read(buf, 0, buf.Length) : 0; }
                 catch { break; }
                 if (n <= 0) break;   // 混音器无输入可读 → 触发 MixerInputEnded（自然结束）
+                lock (peakLock)
+                {
+                    for (int i = 0; i < n; i++)
+                    {
+                        float a = Math.Abs(buf[i]);
+                        if (a > Peak) Peak = a;
+                    }
+                }
                 Thread.Sleep(1);
             }
         }
