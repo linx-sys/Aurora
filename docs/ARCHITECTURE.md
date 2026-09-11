@@ -8,7 +8,7 @@
 - **音频**：NAudio 2.2.1（MIT）— 常驻混音器管线 + WaveOutEvent / WASAPI 独占输出；输出设备经 IAudioOutput 抽象 + 工厂注入（可测），启动后台预热不占 UI 线程
 - **解码**：Media Foundation（mp3/flac/m4a/aac/wav/wma）+ NVorbis 0.10.4（ogg/oga）+ Concentus 1.1.6（opus，NuGet 未上架，本地 DLL）
 - **媒体库**：Microsoft.Data.Sqlite 10.0.12（MIT）— **正式核心存储**（ILibraryStore）：启动 DB 优先秒开列表 + 后台文件系统差分同步
-- **测试**：xUnit，`dotnet test tests/Aurora.Tests.csproj`（191 用例，含引擎测试：fake 输出注入，无声卡可跑）
+- **测试**：xUnit，`dotnet test tests/Aurora.Tests.csproj`（**389 用例**，含引擎测试：fake 输出注入，无声卡可跑；安装事务/清单安全同样可单测）
 
 ## 架构分层
 
@@ -148,6 +148,6 @@ WaveOutEvent（常驻，150ms/4 buffers）
 
 ## 测试
 
-`tests/` 191 用例：PlaybackController（模式/随机轨迹）、PlaylistManager（排序/搜索/批量通知）、Lrc（多时间标签/offset/IndexAt）、Id3（v1/v2.2/2.3/2.4、GBK 回退、封面、损坏容错）、Library（扫描/lrc 配对/文件名推断）、LibraryDatabase + 增量扫描（指纹复用/失效重解析/清理边界）、LibraryDbFirst（DB 秒开物化/差分同步/目录边界）、**PlayerEngine（P1-4：fake IAudioOutput 注入，覆盖播放/暂停/Seek 钳制/解码失败/会话竞态/自然结束/跨淡，无声卡可跑）**、Loudness（校准/门限/频响）、GainFade（包络）、NetMatch 设置、Duration（合成帧流）。
+`tests/` **389 用例**（当前实测：389 通过 / 0 失败 / 0 跳过）：PlaybackController（模式/随机轨迹）、PlaylistManager（排序/搜索/批量通知/路径规范化去重/自引用快照）、Lrc（多时间标签/offset/IndexAt）、Id3（v1/v2.2/2.3/2.4、GBK 回退、封面、损坏容错）、Library（扫描/lrc 配对/文件名推断/取消）、LibraryDatabase + 增量扫描（指纹复用/失效重解析/清理边界）、LibraryDbFirst（DB 秒开物化/差分同步/目录边界）、**PlayerEngine（fake IAudioOutput 注入，覆盖播放/暂停/Seek 钳制/解码失败/会话竞态/自然结束/跨淡，无声卡可跑）**、PlaybackCoordinator（失败状态一致性/响度队列关闭）、Loudness（校准/门限/频响）、GainFade（包络）、NetMatch 设置与数据源启停、Duration（合成帧流）、**InstallManifest/InstallTransaction/InstallSafety（清单校验、事务回滚、同目录重试、用户文件保护）**、ImportRegression（导入并发）、SettingsRegression（非法设置回退）、UpdateChecker（JSON/SHA256/节流）。
 
 > 注意：测试进程需显式 `Encoding.RegisterProvider(CodePagesEncodingProvider.Instance)` 才能覆盖 GBK 链。

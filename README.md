@@ -95,13 +95,18 @@ AuroraPlayer.exe /unassociate   # 取消关联并清理注册表项
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1    # 4 步：主程序 → 卸载器 → 安装器 → Portable
-dotnet test tests/Aurora.Tests.csproj                 # 191 个单元测试
+dotnet test tests/Aurora.Tests.csproj                 # 389 个单元测试
 ```
 
 依赖：NAudio / NVorbis / Microsoft.Data.Sqlite 由 NuGet 锁定版本还原；Concentus（NuGet 未上架）随 `lib/` 提供，均为 MIT。CI（GitHub Actions）自动执行构建 + 测试，打 `v*` tag 自动发布 Release。
 
 ## 已知限制
 
+- **旧版安装目录不支持原地覆盖升级**：安装改为清单驱动后，安装器只接管带安装清单的目录。
+  从 v3.0.0 及更早版本升级时，请先卸载旧版本，或在下一次安装时选择一个**新的专用空目录**；
+  目标目录非空且无有效清单时安装会被拒绝并提示。
+- 安装/升级会在安装目录同级留下 `.AuroraInstall-<hash>` 审计目录（保存事务日志与旧文件备份，
+  供中断恢复与追溯）；卸载不会递归删除它。
 - `.aac`（ADTS）/ `.wma` 无容器标签：标题取自文件名，封面不显示；`.aac` 时长为 CBR 估算
 - 频谱 UI 未启用（管线已内置 PCM 样本抓取，接入即可）
 - 随机播放"上一首"仅本会话有效

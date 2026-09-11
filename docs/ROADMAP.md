@@ -18,6 +18,9 @@
 | Nullable | disable（30 处 Dbg 调用点） | enable 无警告 |
 | 发布 | CI 打 tag 自动 Build+Test+Release | + CHANGELOG / symbols |
 
+> ⚠️ 上表是 **2026-09-10 的历史快照**（当时口径：测试 191、MainWindow 509 行），用于对照各阶段进展，不要当作当前值。
+> 当前状态请见 CHANGELOG（当前实测 **389 例**测试）与 `docs/PROJECT_OVERVIEW.md`。
+
 ---
 
 ## 阶段 0：代码冻结与基线建立 🟡（进行中，develop 分支）
