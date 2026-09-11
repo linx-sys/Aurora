@@ -25,9 +25,9 @@ namespace Aurora.Tests
         [Fact]
         public void PaletteFor_NullOrEmptyTitle_DoesNotThrow()
         {
-            Assert.NotEmpty(CoverArt.PaletteFor(null, "x"));
+            Assert.NotEmpty(CoverArt.PaletteFor(null!, "x"));
             Assert.NotEmpty(CoverArt.PaletteFor("", "x"));
-            Assert.NotEmpty(CoverArt.PaletteFor("t", null));
+            Assert.NotEmpty(CoverArt.PaletteFor("t", null!));
         }
 
         [Fact]
@@ -76,7 +76,7 @@ namespace Aurora.Tests
         public void ReplaceAll_NotifiesCountProperty()
         {
             var c = Make("a", "b");
-            var props = new List<string>();
+            var props = new List<string?>();
             ((System.ComponentModel.INotifyPropertyChanged)c).PropertyChanged += (s, e) => props.Add(e.PropertyName);
 
             c.ReplaceAll(new[] { "x" });

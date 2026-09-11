@@ -4,13 +4,13 @@
  * 接口 + 共享基础设施（HTTP/JSON/缓存写入）+ 酷狗、网易云两个实现。
  * 新增数据源：实现 ILyricsProvider，加入 NetMatch.Providers 即生效，
  * 失效自动降级到下一个源。
- * 依赖：BCL 自带 HttpWebRequest + System.Text.Json
+ * 依赖：BCL 自带 HttpClient + System.Text.Json
  * ============================================================ */
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Threading;
 
@@ -30,6 +30,14 @@ namespace Aurora
         /// 返回 true 表示本源至少命中一项。
         /// </summary>
         bool Match(NetMatchResult r, string musicPath, string title, string artist);
+
+        bool Match(NetMatchResult r, string musicPath, string title, string artist, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            bool matched = Match(r, musicPath, title, artist);
+            cancellationToken.ThrowIfCancellationRequested();
+            return matched;
+        }
     }
 
     /// <summary>
@@ -47,54 +55,69 @@ namespace Aurora
         protected const string Ua =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 
-        static LyricsProviderBase()
+        // 复用连接，TLS 版本与证书验证遵循系统安全配置；不跨请求存储 Cookie。
+        static readonly HttpClient Http = new HttpClient(new HttpClientHandler { UseCookies = false })
         {
-            // 部分数据源（如 imge.kugou.com）与默认 TLS 不兼容，
-            // 显式启用 TLS 1.2，否则 HTTPS 报"未能创建 SSL/TLS 安全通道"。
-            try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
-        }
+            Timeout = TimeSpan.FromMilliseconds(HttpTimeoutMs)
+        };
 
         public abstract string Name { get; }
         public abstract bool Match(NetMatchResult r, string musicPath, string title, string artist);
 
+        public virtual bool Match(NetMatchResult r, string musicPath, string title, string artist, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            bool matched = Match(r, musicPath, title, artist);
+            cancellationToken.ThrowIfCancellationRequested();
+            return matched;
+        }
+
         /* ============================================================
-         * HTTP 基础（HttpWebRequest）
+         * HTTP 基础（HttpClient）
          * ============================================================ */
 
-        protected static HttpWebRequest NewRequest(string url, string referer)
+        protected static HttpRequestMessage NewRequest(string url, string referer)
         {
-            var req = (HttpWebRequest)WebRequest.Create(url);
-            req.Timeout = HttpTimeoutMs;
-            req.ReadWriteTimeout = HttpTimeoutMs;
-            req.UserAgent = Ua;
-            req.Accept = "application/json,text/plain,*/*";
-            if (referer != null) req.Referer = referer;
+            var req = new HttpRequestMessage(HttpMethod.Get, url);
+            req.Headers.UserAgent.ParseAdd(Ua);
+            req.Headers.Accept.ParseAdd("application/json,text/plain,*/*");
+            if (referer != null) req.Headers.Referrer = new Uri(referer);
             return req;
         }
 
-        protected static string HttpGet(string url, string referer)
+        protected static string HttpGet(string url, string referer, CancellationToken cancellationToken = default)
         {
-            HttpWebRequest req = NewRequest(url, referer);
-            using (var resp = (HttpWebResponse)req.GetResponse())
-            using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
-                return sr.ReadToEnd();
+            byte[] bytes = HttpGetBytes(url, referer, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var sr = new StreamReader(new MemoryStream(bytes), Encoding.UTF8);
+            return sr.ReadToEnd();
         }
 
-        protected static byte[] HttpGetBytes(string url, string referer)
+        protected static byte[] HttpGetBytes(string url, string referer, CancellationToken cancellationToken = default)
         {
-            HttpWebRequest req = NewRequest(url, referer);
-            using (var resp = (HttpWebResponse)req.GetResponse())
-            using (var ms = new MemoryStream())
+            cancellationToken.ThrowIfCancellationRequested();
+            using var req = NewRequest(url, referer);
+            try
             {
-                byte[] buf = new byte[16384];
-                int n;
-                while ((n = resp.GetResponseStream().Read(buf, 0, buf.Length)) > 0)
-                    ms.Write(buf, 0, n);
-                return ms.ToArray();
+                // ResponseContentRead 将正文读取也纳入超时与取消范围，保留后台同步接口。
+                using var resp = Http.SendAsync(req, HttpCompletionOption.ResponseContentRead, cancellationToken)
+                    .GetAwaiter().GetResult();
+                resp.EnsureSuccessStatusCode();
+                byte[] bytes = resp.Content.ReadAsByteArrayAsync(cancellationToken).GetAwaiter().GetResult();
+                cancellationToken.ThrowIfCancellationRequested();
+                return bytes;
+            }
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                // 请求超时属于单源失败，仍允许编排层尝试下一个数据源。
+                throw new TimeoutException("歌词请求超时。", ex);
             }
         }
 
-        protected static void SleepRate() { Thread.Sleep(RateLimitMs); }
+        protected static void SleepRate(CancellationToken cancellationToken = default)
+        {
+            System.Threading.Tasks.Task.Delay(RateLimitMs, cancellationToken).GetAwaiter().GetResult();
+        }
 
         /* ============================================================
          * JSON 辅助（System.Text.Json → Dictionary/object[] 树）
@@ -185,28 +208,36 @@ namespace Aurora
         }
 
         /// <summary>写入歌词缓存（UTF-8 无 BOM）；已命中则跳过。失败抛异常由编排层记录。</summary>
-        protected static void SaveLyrics(NetMatchResult r, string text)
+        protected static void SaveLyrics(NetMatchResult r, string text, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(text) || r.LyricsMatched) return;
             Directory.CreateDirectory(Path.GetDirectoryName(r.LyricPath));
+            cancellationToken.ThrowIfCancellationRequested();
             File.WriteAllText(r.LyricPath, text, new UTF8Encoding(false));
+            cancellationToken.ThrowIfCancellationRequested();
             r.LyricsMatched = true;
         }
 
         /// <summary>下载封面到缓存；网络/写盘失败记录日志后静默（封面属锦上添花）。</summary>
-        protected static void SaveCover(NetMatchResult r, string coverUrl)
+        protected static void SaveCover(NetMatchResult r, string coverUrl, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (string.IsNullOrEmpty(coverUrl) || r.CoverMatched) return;
             try
             {
-                byte[] bytes = HttpGetBytes(coverUrl, null);
+                byte[] bytes = HttpGetBytes(coverUrl, null, cancellationToken);
                 if (bytes.Length > 0)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     Directory.CreateDirectory(Path.GetDirectoryName(r.CoverPath));
+                    cancellationToken.ThrowIfCancellationRequested();
                     File.WriteAllBytes(r.CoverPath, bytes);
+                    cancellationToken.ThrowIfCancellationRequested();
                     r.CoverMatched = true;
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 MainViewModel.Dbg("SaveCover FAIL: " + coverUrl + " -> " + ex.Message);
@@ -224,14 +255,18 @@ namespace Aurora
     {
         public override string Name { get { return "酷狗"; } }
 
-        public override bool Match(NetMatchResult r, string musicPath, string title, string artist)
+        public override bool Match(NetMatchResult r, string musicPath, string title, string artist) =>
+            Match(r, musicPath, title, artist, CancellationToken.None);
+
+        public override bool Match(NetMatchResult r, string musicPath, string title, string artist, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string query = string.IsNullOrEmpty(artist) ? title : title + " " + artist;
             string url = "https://songsearch.kugou.com/song_search_v2?keyword=" +
                          Uri.EscapeDataString(query) + "&page=1&pagesize=" + SearchLimit +
                          "&platform=WebFilter&tag=em&filter=2&iscorrection=1";
 
-            Dictionary<string, object> root = JObj(HttpGet(url, null));
+            Dictionary<string, object> root = JObj(HttpGet(url, null, cancellationToken));
             object data = root != null ? JGet(root, "data") : null;
             object[] lists = data != null ? JArr(JGet(data, "lists")) : null;
             if (lists == null || lists.Length == 0) return false;
@@ -263,11 +298,11 @@ namespace Aurora
             if (best == null || bestScore < MinAcceptableScore) return false;
 
             // 歌词：候选列表 → 下载（Base64 → UTF-8 LRC）
-            SleepRate();
+            SleepRate(cancellationToken);
             string kw = string.IsNullOrEmpty(artist) ? bestName : bestName + " " + artist;
             string lyricSearch = "https://krcs.kugou.com/search?ver=1&man=yes&client=mobi" +
                                  "&keyword=" + Uri.EscapeDataString(kw) + "&hash=" + bestHash;
-            Dictionary<string, object> lroot = JObj(HttpGet(lyricSearch, null));
+            Dictionary<string, object> lroot = JObj(HttpGet(lyricSearch, null, cancellationToken));
             object[] cands = lroot != null ? JArr(JGet(lroot, "candidates")) : null;
             if (cands != null && cands.Length > 0)
             {
@@ -286,21 +321,22 @@ namespace Aurora
                     tried++;
                     try
                     {
-                        SleepRate();
+                        SleepRate(cancellationToken);
                         string dlUrl = "https://krcs.kugou.com/download?ver=1&man=yes&client=mobi" +
                                        "&id=" + Uri.EscapeDataString(id) +
                                        "&accesskey=" + Uri.EscapeDataString(accessKey) +
                                        "&fmt=lrc&charset=utf8";
-                        Dictionary<string, object> droot = JObj(HttpGet(dlUrl, null));
+                        Dictionary<string, object> droot = JObj(HttpGet(dlUrl, null, cancellationToken));
                         string content = droot != null ? JStr(JGet(droot, "content")) : "";
                         if (content.Length > 0)
                         {
                             byte[] bytes = Convert.FromBase64String(content);
                             string lrc = Encoding.UTF8.GetString(bytes);
-                            SaveLyrics(r, lrc);
+                            SaveLyrics(r, lrc, cancellationToken);
                             if (r.LyricsMatched) break;
                         }
                     }
+                    catch (OperationCanceledException) { throw; }
                     catch (FormatException) { }
                     catch (Exception) { }
                 }
@@ -310,8 +346,8 @@ namespace Aurora
             string coverUrl = BuildCoverUrl(bestImage, bestAlbumId);
             if (coverUrl != null)
             {
-                SleepRate();
-                SaveCover(r, coverUrl);
+                SleepRate(cancellationToken);
+                SaveCover(r, coverUrl, cancellationToken);
             }
 
             return r.LyricsMatched || r.CoverMatched;
@@ -389,13 +425,17 @@ namespace Aurora
     {
         public override string Name { get { return "网易云"; } }
 
-        public override bool Match(NetMatchResult r, string musicPath, string title, string artist)
+        public override bool Match(NetMatchResult r, string musicPath, string title, string artist) =>
+            Match(r, musicPath, title, artist, CancellationToken.None);
+
+        public override bool Match(NetMatchResult r, string musicPath, string title, string artist, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string query = string.IsNullOrEmpty(artist) ? title : title + " " + artist;
             string searchUrl = "https://music.163.com/api/search/get/web?s=" +
                                Uri.EscapeDataString(query) + "&type=1&limit=20&offset=0";
 
-            Dictionary<string, object> sroot = JObj(HttpGet(searchUrl, "https://music.163.com/"));
+            Dictionary<string, object> sroot = JObj(HttpGet(searchUrl, "https://music.163.com/", cancellationToken));
             object result = sroot != null ? JGet(sroot, "result") : null;
             object[] songs = result != null ? JArr(JGet(result, "songs")) : null;
             if (songs == null || songs.Length == 0) return false;
@@ -430,12 +470,12 @@ namespace Aurora
             if (bestId == 0 || bestScore < MinAcceptableScore) return false;
 
             // 封面：歌曲详情
-            SleepRate();
+            SleepRate(cancellationToken);
             string detailUrl = "https://music.163.com/api/song/detail/?id=" + bestId +
                                "&ids=" + Uri.EscapeDataString("[" + bestId + "]");
             try
             {
-                Dictionary<string, object> droot = JObj(HttpGet(detailUrl, "https://music.163.com/"));
+                Dictionary<string, object> droot = JObj(HttpGet(detailUrl, "https://music.163.com/", cancellationToken));
                 object[] dsongs = droot != null ? JArr(JGet(droot, "songs")) : null;
                 if (dsongs != null && dsongs.Length > 0)
                 {
@@ -443,25 +483,28 @@ namespace Aurora
                     string pic = album != null ? JStr(JGet(album, "picUrl")) : "";
                     if (pic.Length > 0)
                     {
-                        SleepRate();
-                        SaveCover(r, pic);
+                        SleepRate(cancellationToken);
+                        SaveCover(r, pic, cancellationToken);
                     }
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch { }
 
             // 歌词
-            SleepRate();
+            SleepRate(cancellationToken);
             string lyricUrl = "https://music.163.com/api/song/lyric?id=" + bestId + "&lv=1&kv=1&tv=-1";
             try
             {
-                Dictionary<string, object> lroot = JObj(HttpGet(lyricUrl, "https://music.163.com/"));
+                Dictionary<string, object> lroot = JObj(HttpGet(lyricUrl, "https://music.163.com/", cancellationToken));
                 object lrc = lroot != null ? JGet(lroot, "lrc") : null;
                 string lyric = lrc != null ? JStr(JGet(lrc, "lyric")) : "";
-                SaveLyrics(r, lyric);
+                SaveLyrics(r, lyric, cancellationToken);
             }
+            catch (OperationCanceledException) { throw; }
             catch { }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return r.LyricsMatched || r.CoverMatched;
         }
 

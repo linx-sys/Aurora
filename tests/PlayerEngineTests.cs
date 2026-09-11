@@ -59,15 +59,15 @@ namespace Aurora.Tests
     /// <summary>模拟输出设备：Play 时后台线程从混音器拉样本（真实设备的行为模型）；记录峰值供增益联动断言。</summary>
     class FakeAudioOutput : IAudioOutput
     {
-        public ISampleProvider Source;
+        public ISampleProvider? Source;
         public int PlayCount, PauseCount, StopCount;
         public float Peak;                       // 已拉取样本的最大绝对幅值
         readonly object peakLock = new object();
         public float Volume { get; set; } = 1f;
-        Thread puller;
+        Thread? puller;
         volatile bool pulling;
 
-        public event EventHandler<StoppedEventArgs> PlaybackStopped;
+        public event EventHandler<StoppedEventArgs>? PlaybackStopped;
 
         public void Play()
         {
@@ -240,7 +240,7 @@ namespace Aurora.Tests
         public void NaturalEnd_FiresPlaybackEndedWithSession()
         {
             var ended = new ManualResetEventSlim(false);
-            PlaybackEndedEventArgs args = null;
+            PlaybackEndedEventArgs? args = null;
             engine.PlaybackEnded += (s, e) => { args = e; ended.Set(); };
 
             engine.Load(dummyFile);
@@ -249,6 +249,7 @@ namespace Aurora.Tests
 
             // fake 设备拉完 1 秒数据 → 混音器输入耗尽 → 自然结束
             Assert.True(ended.Wait(TimeSpan.FromSeconds(10)), "未在超时内收到 PlaybackEnded");
+            Assert.NotNull(args);
             Assert.Equal(session, args.SessionId);
             Assert.Equal(dummyFile, args.Path);
             Assert.Equal(PlaybackState.Stopped, engine.State);

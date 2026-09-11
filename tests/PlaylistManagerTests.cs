@@ -6,13 +6,14 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Linq;
 using Xunit;
 
 namespace Aurora.Tests
 {
     public class PlaylistManagerTests
     {
-        static Track T(string path, string title = null, string artist = null, string album = null, int seconds = 0)
+        static Track T(string path, string? title = null, string? artist = null, string? album = null, int seconds = 0)
         {
             return new Track
             {
@@ -32,6 +33,105 @@ namespace Aurora.Tests
             int added = pm.AddRange(new[] { T("a.mp3"), T("b.mp3"), T("a.mp3"), T("B.MP3") });
             Assert.Equal(2, added);   // a.mp3 重复；B.MP3 与 b.mp3 大小写不敏感视为同一文件
             Assert.Equal(2, pm.Tracks.Count);
+        }
+
+        [Fact]
+        public void AddRange_BatchesBothCollectionsAndNormalizesPaths()
+        {
+            var pm = new PlaylistManager();
+            int tracksReset = 0, viewReset = 0;
+            pm.Tracks.CollectionChanged += (_, e) => { Assert.Equal(NotifyCollectionChangedAction.Reset, e.Action); tracksReset++; };
+            pm.View.CollectionChanged += (_, e) => { Assert.Equal(NotifyCollectionChangedAction.Reset, e.Action); viewReset++; };
+            var additions = new List<Track>();
+            for (int i = 0; i < 500; i++) additions.Add(T("D:/Müsic/" + i + ".mp3"));
+            additions.Add(T("d:\\MÜSIC\\.\\0.MP3"));
+            Assert.Equal(500, pm.AddRange(additions));
+            Assert.Equal(1, tracksReset);
+            Assert.Equal(1, viewReset);
+            Assert.Equal(0, pm.AddRange(additions));
+            Assert.Equal(1, tracksReset);
+            Assert.Equal(1, viewReset);
+            Assert.Same(pm.Tracks[0], pm.FindByPath("d:/müsic/./0.mp3"));
+        }
+
+        [Fact]
+        public void AddRange_PreservesExistingObjectsAndInsertionOrder()
+        {
+            var pm = new PlaylistManager { SortMode = 5 };
+            var existing = T("D:/Music/z.mp3");
+            var existingDuplicate = T("d:/music/./Z.MP3");
+            pm.ReplaceTracks(new[] { existing, existingDuplicate });
+            var first = T("D:/Music/b.mp3");
+            var second = T("D:/Music/a.mp3");
+
+            Assert.Equal(2, pm.AddRange(new[]
+            {
+                T("d:/MUSIC/./z.mp3"), first, null!, T("D:/Music/./B.MP3"), second
+            }));
+
+            var expected = new[] { existing, existingDuplicate, first, second };
+            Assert.Equal(expected, pm.Tracks);
+            Assert.Equal(expected, pm.View);
+            for (int i = 0; i < expected.Length; i++) Assert.Same(expected[i], pm.Tracks[i]);
+        }
+
+        [Fact]
+        public void AddRange_AcceptsDeferredEnumerationOfTracks()
+        {
+            var pm = new PlaylistManager();
+            var first = T("b.mp3");
+            var second = T("a.mp3");
+            pm.AddRange(new[] { first, second });
+
+            Assert.Equal(2, pm.AddRange(pm.Tracks.Select(t => T(t.FilePath + ".new"))));
+
+            Assert.Same(first, pm.Tracks[0]);
+            Assert.Same(second, pm.Tracks[1]);
+            Assert.Equal(new[] { "b.mp3", "a.mp3", "b.mp3.new", "a.mp3.new" },
+                pm.Tracks.Select(t => t.FilePath));
+        }
+
+        [Fact]
+        public void AddRange_NullOrEmptyInputDoesNotNotify()
+        {
+            var pm = new PlaylistManager();
+            int notifications = 0;
+            pm.Tracks.CollectionChanged += (_, _) => notifications++;
+            pm.View.CollectionChanged += (_, _) => notifications++;
+
+            Assert.Equal(0, pm.AddRange(null!));
+            Assert.Equal(0, pm.AddRange(Array.Empty<Track>()));
+            Assert.Equal(0, pm.AddRange(new Track[] { null! }));
+            Assert.Equal(0, notifications);
+        }
+
+        [Theory]
+        [InlineData(0, "文件名")]
+        [InlineData(1, "标题")]
+        [InlineData(2, "歌手")]
+        [InlineData(3, "时长升序")]
+        [InlineData(4, "时长降序")]
+        [InlineData(5, "自定义顺序")]
+        public void GetSortModeName_ReturnsExpectedName(int mode, string expected)
+        {
+            Assert.Equal(expected, PlaylistManager.GetSortModeName(mode));
+        }
+
+        [Theory]
+        [InlineData(-1)]
+        [InlineData(6)]
+        [InlineData(int.MinValue)]
+        [InlineData(int.MaxValue)]
+        public void SortMode_InvalidValuesUseDefault(int value)
+        {
+            var pm = new PlaylistManager { SortMode = 5 };
+            pm.AddRange(new[] { T("b.mp3"), T("a.mp3") });
+            pm.SortMode = value;
+            Assert.Equal(0, pm.SortMode);
+            Assert.Equal("a.mp3", pm.View[0].FileName);
+            Assert.Equal(6, PlaylistManager.SortModeCount);
+            Assert.Equal(PlaylistManager.GetSortModeName(0), PlaylistManager.GetSortModeName(value));
+            for (int i = 0; i < PlaylistManager.SortModeCount; i++) Assert.False(string.IsNullOrEmpty(PlaylistManager.GetSortModeName(i)));
         }
 
         [Fact]
@@ -131,6 +231,60 @@ namespace Aurora.Tests
             Assert.DoesNotContain(pm.Tracks, t => t.FileName == "a.mp3");
         }
 
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void ReplaceAll_SnapshotsSelfReferencedInputBeforeClearing(bool deferred)
+        {
+            var collection = new BatchObservableCollection<int> { 3, 1, 2 };
+            int notifications = 0;
+            collection.CollectionChanged += (_, e) =>
+            {
+                Assert.Equal(NotifyCollectionChangedAction.Reset, e.Action);
+                notifications++;
+            };
+            IEnumerable<int> source = collection;
+            if (deferred) source = collection.Where(value => value > 1);
+
+            collection.ReplaceAll(source);
+
+            Assert.Equal(deferred ? new[] { 3, 2 } : new[] { 3, 1, 2 }, collection);
+            Assert.Equal(1, notifications);
+        }
+
+        [Fact]
+        public void ReplaceTracks_AcceptsDeferredEnumerationOfTracks()
+        {
+            var pm = new PlaylistManager { SortMode = 5 };
+            var first = T("c.mp3");
+            var second = T("b.mp3");
+            pm.AddRange(new[] { first, T("a.mp3"), second });
+
+            pm.ReplaceTracks(pm.Tracks.Where(t => t.FileName != "a.mp3"));
+
+            Assert.Equal(new[] { first, second }, pm.Tracks);
+            Assert.Equal(new[] { first, second }, pm.View);
+        }
+
+        [Fact]
+        public void ReplaceAll_RejectsReentrancyWithMultipleSubscribers()
+        {
+            var collection = new BatchObservableCollection<int> { 1 };
+            bool attemptedReentry = false;
+            collection.CollectionChanged += (_, _) =>
+            {
+                if (attemptedReentry) return;
+                attemptedReentry = true;
+                Assert.Throws<InvalidOperationException>(() => collection.ReplaceAll(new[] { 9 }));
+            };
+            collection.CollectionChanged += (_, _) => { };
+
+            collection.ReplaceAll(new[] { 2, 3 });
+
+            Assert.True(attemptedReentry);
+            Assert.Equal(new[] { 2, 3 }, collection);
+        }
+
         [Fact]
         public void RefreshView_RaisesSingleResetNotification()
         {
@@ -190,7 +344,7 @@ namespace Aurora.Tests
             pm.AddRange(new[] { a });
             Assert.Same(a, pm.FindByPath("music\\song01.mp3"));
             Assert.Null(pm.FindByPath("missing.mp3"));
-            Assert.Null(pm.FindByPath(null));
+            Assert.Null(pm.FindByPath(null!));   // 故意传入违约空值，验证运行时防御。
         }
     }
 }

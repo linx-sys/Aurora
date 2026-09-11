@@ -1,12 +1,11 @@
-#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
+#nullable disable
 /* ============================================================
- * SmTcController.cs — Windows 系统媒体传输控制（SMTC，P2-5）
- * 锁屏/系统媒体浮层显示曲目信息 + 媒体键（播放/暂停/上一首/下一首）。
- * 桌面应用不能用 GetForCurrentView()，走 SystemMediaTransportControlsInterop
- * .GetForWindow(hwnd)；须在 UI 线程创建（WinRT 对象线程约束）。
- * 任何失败（旧系统/投影缺失）静默降级：媒体键失效，其余功能不受影响。
+ * SmTcController.cs — Windows 系统媒体传输控制。
+ * 仅在 UI 线程且窗口 HWND 已就绪时初始化，失败不影响播放器。
  * ============================================================ */
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using Windows.Foundation;
 using Windows.Media;
@@ -14,26 +13,33 @@ using Windows.Storage.Streams;
 
 namespace Aurora
 {
-    class SmTcController
+    class SmTcController : IDisposable
     {
         readonly Window win;
         readonly MainViewModel vm;
+        readonly CancellationTokenSource lifetime = new CancellationTokenSource();
+        readonly CancellationToken token;
         SystemMediaTransportControls smtc;
+        InMemoryRandomAccessStream thumbnailStream;
+        long metadataGeneration;
+        bool disposed;
 
         public SmTcController(Window win, MainViewModel vm)
         {
             this.win = win;
             this.vm = vm;
+            token = lifetime.Token;
+            win.Closed += OnClosed;
         }
 
-        /// <summary>挂接 SMTC（UI 线程调用一次；失败静默禁用）。</summary>
+        /// <summary>在 SourceInitialized/Loaded 后调用；重复调用不会重复注册媒体键。</summary>
         public void Attach()
         {
+            if (disposed || smtc != null) return;
             try
             {
                 IntPtr hwnd = new System.Windows.Interop.WindowInteropHelper(win).Handle;
                 if (hwnd == IntPtr.Zero) return;
-
                 smtc = SystemMediaTransportControlsInterop.GetForWindow(hwnd);
                 smtc.IsEnabled = true;
                 smtc.IsPlayEnabled = true;
@@ -42,96 +48,139 @@ namespace Aurora
                 smtc.IsPreviousEnabled = true;
                 smtc.PlaybackStatus = MediaPlaybackStatus.Closed;
                 smtc.ButtonPressed += OnButtonPressed;
+                UpdateMetadata(vm.CurrentTrack);
+                if (vm.CurrentTrack != null) UpdateStatus(vm.IsPlaying);
             }
             catch (Exception ex)
             {
                 MainViewModel.Dbg("SMTC attach FAIL: " + ex.Message);
-                smtc = null;
+                ReleaseControls();
             }
         }
 
-        /// <summary>媒体键 → 转发 ViewModel 命令（切回 UI 线程）。</summary>
         void OnButtonPressed(SystemMediaTransportControls sender, SystemMediaTransportControlsButtonPressedEventArgs e)
         {
-            win.Dispatcher.BeginInvoke((Action)(() =>
-            {
-                try
-                {
-                    switch (e.Button)
-                    {
-                        case SystemMediaTransportControlsButton.Play:
-                            if (!vm.IsPlaying && vm.TogglePlayCommand.CanExecute(null)) vm.TogglePlayCommand.Execute(null);
-                            break;
-                        case SystemMediaTransportControlsButton.Pause:
-                            if (vm.IsPlaying && vm.TogglePlayCommand.CanExecute(null)) vm.TogglePlayCommand.Execute(null);
-                            break;
-                        case SystemMediaTransportControlsButton.Next:
-                            if (vm.NextCommand.CanExecute(null)) vm.NextCommand.Execute(null);
-                            break;
-                        case SystemMediaTransportControlsButton.Previous:
-                            if (vm.PrevCommand.CanExecute(null)) vm.PrevCommand.Execute(null);
-                            break;
-                    }
-                }
-                catch (Exception ex) { MainViewModel.Dbg("SMTC button FAIL: " + ex.Message); }
-            }));
-        }
-
-        /// <summary>播放状态变化 → 更新系统浮层状态（UI 线程调用）。</summary>
-        public void UpdateStatus(bool playing)
-        {
-            if (smtc == null) return;
+            if (token.IsCancellationRequested || win.Dispatcher.HasShutdownStarted) return;
             try
             {
-                smtc.PlaybackStatus = playing ? MediaPlaybackStatus.Playing : MediaPlaybackStatus.Paused;
+                win.Dispatcher.BeginInvoke((Action)(() =>
+                {
+                    if (token.IsCancellationRequested) return;
+                    try
+                    {
+                        switch (e.Button)
+                        {
+                            case SystemMediaTransportControlsButton.Play:
+                                if (!vm.IsPlaying && vm.TogglePlayCommand.CanExecute(null)) vm.TogglePlayCommand.Execute(null);
+                                break;
+                            case SystemMediaTransportControlsButton.Pause:
+                                if (vm.IsPlaying && vm.TogglePlayCommand.CanExecute(null)) vm.TogglePlayCommand.Execute(null);
+                                break;
+                            case SystemMediaTransportControlsButton.Next:
+                                if (vm.NextCommand.CanExecute(null)) vm.NextCommand.Execute(null);
+                                break;
+                            case SystemMediaTransportControlsButton.Previous:
+                                if (vm.PrevCommand.CanExecute(null)) vm.PrevCommand.Execute(null);
+                                break;
+                        }
+                    }
+                    catch (Exception ex) { MainViewModel.Dbg("SMTC button FAIL: " + ex.Message); }
+                }));
             }
+            catch (InvalidOperationException) { }
+        }
+
+        public void UpdateStatus(bool playing)
+        {
+            if (disposed || smtc == null) return;
+            try { smtc.PlaybackStatus = playing ? MediaPlaybackStatus.Playing : MediaPlaybackStatus.Paused; }
             catch { }
         }
 
-        /// <summary>曲目变更 → 推送元数据（标题/歌手/专辑/封面缩略图）到系统浮层。</summary>
-        public void UpdateMetadata(Track t)
+        public void UpdateMetadata(Track t) => _ = UpdateMetadataAsync(t);
+
+        /// <summary>UI 线程调用；封面写入真正异步，较早曲目的结果不能覆盖较新曲目。</summary>
+        public async Task UpdateMetadataAsync(Track t)
         {
-            if (smtc == null) return;
+            long generation = ++metadataGeneration;
+            if (disposed || smtc == null) return;
+            InMemoryRandomAccessStream pending = null;
             try
             {
-                SystemMediaTransportControlsDisplayUpdater upd = smtc.DisplayUpdater;
+                var controls = smtc;
+                var updater = controls.DisplayUpdater;
+                updater.ClearAll();
+                updater.Thumbnail = null;
                 if (t == null)
                 {
-                    smtc.PlaybackStatus = MediaPlaybackStatus.Stopped;
-                    upd.ClearAll();
-                    upd.Update();
+                    controls.PlaybackStatus = MediaPlaybackStatus.Stopped;
+                    updater.Update();
+                    ReleaseThumbnail();
                     return;
                 }
-                upd.Type = MediaPlaybackType.Music;
-                MusicDisplayProperties music = upd.MusicProperties;
-                music.Title = t.Title ?? "";
-                music.Artist = t.Artist ?? "";
-                music.AlbumTitle = t.Album ?? "";
-                if (t.Cover != null && t.Cover.Length > 0)
-                    upd.Thumbnail = CreateThumbnail(t.Cover);
-                upd.Update();
+                updater.Type = MediaPlaybackType.Music;
+                updater.MusicProperties.Title = t.Title ?? "";
+                updater.MusicProperties.Artist = t.Artist ?? "";
+                updater.MusicProperties.AlbumTitle = t.Album ?? "";
+                updater.Update();
+                ReleaseThumbnail();
+                byte[] cover = t.Cover;
+                if (cover == null || cover.Length == 0) return;
+
+                pending = new InMemoryRandomAccessStream();
+                using (var output = pending.GetOutputStreamAt(0))
+                using (var writer = new DataWriter(output))
+                {
+                    writer.WriteBytes(cover);
+                    await writer.StoreAsync().AsTask(token);
+                    await writer.FlushAsync().AsTask(token);
+                    writer.DetachStream();
+                }
+                token.ThrowIfCancellationRequested();
+                if (generation != metadataGeneration || controls != smtc) return;
+                pending.Seek(0);
+                updater.Thumbnail = RandomAccessStreamReference.CreateFromStream(pending);
+                updater.Update();
+                // 缩略图引用可能稍后读取；保留底层流直到下一首清除或关闭。
+                thumbnailStream = pending;
+                pending = null;
             }
-            catch (Exception ex)
-            {
-                MainViewModel.Dbg("SMTC metadata FAIL: " + ex.Message);
-            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { MainViewModel.Dbg("SMTC metadata FAIL: " + ex.Message); }
+            finally { pending?.Dispose(); }
         }
 
-        /// <summary>内嵌封面字节 → 随机访问流缩略图（best-effort，失败返回 null 不推缩略图）。</summary>
-        static RandomAccessStreamReference CreateThumbnail(byte[] cover)
+        void ReleaseThumbnail()
         {
-            try
+            thumbnailStream?.Dispose();
+            thumbnailStream = null;
+        }
+
+        void ReleaseControls()
+        {
+            var controls = smtc;
+            smtc = null;
+            if (controls != null)
             {
-                var stream = new InMemoryRandomAccessStream();
-                var writer = new DataWriter(stream.GetOutputStreamAt(0));
-                writer.WriteBytes(cover);
-                writer.StoreAsync().AsTask().Wait(500);
-                writer.FlushAsync().AsTask().Wait(500);
-                writer.DetachStream();
-                stream.Seek(0);
-                return RandomAccessStreamReference.CreateFromStream(stream);
+                try { controls.ButtonPressed -= OnButtonPressed; } catch { }
+                try { controls.PlaybackStatus = MediaPlaybackStatus.Stopped; } catch { }
+                try { controls.DisplayUpdater.ClearAll(); controls.DisplayUpdater.Update(); } catch { }
+                try { controls.IsEnabled = false; } catch { }
             }
-            catch { return null; }
+            ReleaseThumbnail();
+        }
+
+        void OnClosed(object sender, EventArgs e) => Dispose();
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            ++metadataGeneration;
+            win.Closed -= OnClosed;
+            lifetime.Cancel();
+            ReleaseControls();
+            lifetime.Dispose();
         }
     }
 }

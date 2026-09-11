@@ -1,28 +1,85 @@
-#nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
-/* ============================================================
- * LibraryImportController.cs — 媒体库导入控制器
- * 从 MainWindow.cs 拆出（原属"媒体库加载"职责）。
- * 负责文件夹选择、目录扫描（后台线程）、拖放导入、播放恢复；
- * 扫描结果统一写入 ViewModel.Playlist（唯一数据源）。
- * ============================================================ */
+#nullable disable
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Threading;
 using IOPath = System.IO.Path;
 using WinForms = System.Windows.Forms;
 
 namespace Aurora
 {
-    public class LibraryImportController
+    /// <summary>串行执行后台工作和其 UI 提交；单项失败不阻塞后续任务。</summary>
+    public sealed class LibraryWorkQueue : IDisposable
+    {
+        readonly object gate = new object();
+        readonly CancellationTokenSource lifetime = new CancellationTokenSource();
+        Task tail = Task.CompletedTask;
+        bool disposed;
+
+        public Task Completion { get { lock (gate) return tail; } }
+
+        public Task Enqueue(Func<CancellationToken, Task> work, CancellationToken cancellationToken = default)
+        {
+            if (work == null) throw new ArgumentNullException(nameof(work));
+            lock (gate)
+            {
+                if (disposed) return Task.FromCanceled(new CancellationToken(true));
+                Task previous = tail;
+                Task item = Task.Run(async () =>
+                {
+                    await previous.ConfigureAwait(false);
+                    using (var linked = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken))
+                    {
+                        linked.Token.ThrowIfCancellationRequested();
+                        await work(linked.Token).ConfigureAwait(false);
+                    }
+                });
+                // 对每个错误立即建立观察者；返回原任务供 await 调用方读取失败。
+                tail = ObserveAsync(item);
+                return item;
+            }
+        }
+
+        static async Task ObserveAsync(Task item)
+        {
+            try { await item.ConfigureAwait(false); }
+            catch { }
+        }
+
+        public void Dispose()
+        {
+            Task completion;
+            lock (gate)
+            {
+                if (disposed) return;
+                disposed = true;
+                completion = tail;
+            }
+            lifetime.Cancel();
+            _ = completion.ContinueWith(_ => lifetime.Dispose(), CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+    }
+
+    public class LibraryImportController : IDisposable
     {
         readonly Window win;
         readonly MainViewModel vm;
-        readonly ILibraryStore store;   // 音乐库正式核心存储（P1-3：DB 优先秒开 + 差分同步）
+        readonly ILibraryStore store;
         readonly Action<string> toast;
-        readonly Action<Track, bool> playTrack;   // 当前曲目切换（业务在 ViewModel.PlayTrack）
-        bool isLoadingDir;
+        readonly Action<Track, bool> playTrack;
+        readonly LibraryWorkQueue queue = new LibraryWorkQueue();
+        volatile bool closed;
+        volatile bool isLoadingDir;
+        long directoryGeneration;
+        long playbackRevision;
+
+        public Task Completion => queue.Completion;
+        public bool IsLoadingDirectory => isLoadingDir;
 
         public LibraryImportController(Window win, MainViewModel vm, ILibraryStore store,
             Action<string> toast, Action<Track, bool> playTrack)
@@ -32,7 +89,17 @@ namespace Aurora
             this.store = store;
             this.toast = toast;
             this.playTrack = playTrack;
+            vm.PropertyChanged += OnPlaybackChanged;
+            win.Closed += OnClosed;
         }
+
+        void OnPlaybackChanged(object sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName == nameof(MainViewModel.CurrentTrack) || e.PropertyName == nameof(MainViewModel.IsPlaying))
+                Interlocked.Increment(ref playbackRevision);
+        }
+
+        void OnClosed(object sender, EventArgs e) => Dispose();
 
         public static string SafeDir(string path)
         {
@@ -41,111 +108,142 @@ namespace Aurora
 
         public void PickFolder()
         {
+            if (closed) return;
             using (var dlg = new WinForms.FolderBrowserDialog())
             {
                 dlg.Description = "选择存放音乐的文件夹";
                 dlg.ShowNewFolderButton = false;
-                if (dlg.ShowDialog() == WinForms.DialogResult.OK)
-                    LoadDirectory(dlg.SelectedPath, null, false);
+                if (dlg.ShowDialog() == WinForms.DialogResult.OK) LoadDirectory(dlg.SelectedPath, null, false);
             }
         }
 
-        /// <summary>
-        /// 加载目录（替换现有列表）。P1-3 两段式：
-        /// ① DB 优先秒开——库行直接物化列表立即填充（仅视觉，不触发播放）；
-        /// ② 后台差分同步——枚举文件系统做指纹差分 upsert/清理，权威结果整表替换并恢复播放状态。
-        /// </summary>
         public void LoadDirectory(string dir, string autoPlayPath, bool silent)
+            => _ = LoadDirectoryAsync(dir, autoPlayPath, silent);
+
+        public Task LoadDirectoryAsync(string dir, string autoPlayPath, bool silent, CancellationToken cancellationToken = default)
         {
-            if (isLoadingDir) return;
-            isLoadingDir = true;
-            if (!silent) toast("正在扫描文件夹…");
-            string d = dir;
-            string auto = autoPlayPath;
-            ThreadPool.QueueUserWorkItem(_ =>
+            long generation = Interlocked.Increment(ref directoryGeneration);
+            long requestedPlayback = Interlocked.Read(ref playbackRevision);
+            return queue.Enqueue(async token =>
             {
-                // ① DB 秒开（有缓存行时几乎瞬时出列表）。零探测快路径：
-                //    不做存在性/lrc/外部封面探测（超大库逐文件探测是启动瓶颈）——
-                //    已删文件成为短命幽灵行、lrc 与外部封面由 ② 权威同步补齐
-                List<TrackRow> cached = store.GetByPrefix(d);
-                if (cached.Count > 0)
+                isLoadingDir = true;
+                try
                 {
-                    List<Track> quick = Library.BuildTracksFromRows(cached, probeExtras: false);
-                    if (quick.Count > 0)
+                    if (!silent) await SubmitAsync(() => toast("正在扫描文件夹…"), token, generation).ConfigureAwait(false);
+                    token.ThrowIfCancellationRequested();
+                    List<TrackRow> cached = store.GetByPrefix(dir);
+                    if (cached.Count > 0)
                     {
-                        win.Dispatcher.BeginInvoke((Action)(() =>
+                        var quick = Library.BuildTracksFromRows(cached, probeExtras: false, cancellationToken: token);
+                        await SubmitAsync(() =>
                         {
-                            vm.SearchText = "";   // 换目录清空搜索词，避免旧词把新列表全过滤掉
-                            vm.Playlist.ReplaceTracks(quick);   // 单次批量刷新（唯一数据源）
-                        }));
+                            PreserveCurrentTrack(quick);
+                            vm.Playlist.ReplaceTracks(quick);
+                        }, token, generation).ConfigureAwait(false);
                     }
+
+                    var files = new List<string>();
+                    bool complete = Library.EnumerateFiles(dir, files, 0, token);
+                    var built = Library.BuildTracksIncremental(files, store, dir, token, complete);
+                    await SubmitAsync(() =>
+                    {
+                        PreserveCurrentTrack(built);
+                        vm.Playlist.ReplaceTracks(built);
+                        Settings.Set("lastDir", dir);
+                        if (!silent) toast(complete
+                            ? (built.Count == 0 ? "文件夹里没有找到音频文件" : "已加载 " + built.Count + " 首歌曲")
+                            : "部分目录无法读取，已保留原有媒体库记录");
+                        // 不重置搜索，不打断扫描期间由用户选择/暂停/播放的曲目。
+                        if (built.Count == 0 || requestedPlayback != Interlocked.Read(ref playbackRevision)) return;
+                        if (autoPlayPath != null)
+                        {
+                            Track hit = FindByPath(built, autoPlayPath);
+                            if (hit != null) { playTrack(hit, true); return; }
+                        }
+                        if (vm.CurrentTrack != null) return;
+                        Track restore = FindByPath(built, Settings.Get("lastTrack", "")) ?? built[0];
+                        playTrack(restore, false);
+                    }, token, generation).ConfigureAwait(false);
                 }
-
-                // ② 差分同步（权威）：枚举 → 指纹差分 upsert / 清理过期行 → 整表替换
-                var files = new List<string>();
-                Library.EnumerateFiles(d, files, 0);
-                List<Track> built = Library.BuildTracksIncremental(files, store, d);
-                win.Dispatcher.BeginInvoke((Action)(() =>
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
                 {
-                    isLoadingDir = false;
-                    vm.ResetShuffleHistory();   // 换目录清空随机播放轨迹
-                    vm.SearchText = "";   // 换文件夹清空搜索词，避免旧词把新列表全过滤掉（绑定回写搜索框）
-                    vm.Playlist.ReplaceTracks(built);   // 整表替换 + 单次批量刷新（唯一数据源）
-                    Settings.Set("lastDir", d);
-                    var view = vm.View;
-                    var tracks = vm.Tracks;
-                    if (view.Count == 0)
-                    {
-                        if (!silent) toast("文件夹里没有找到音频文件");
-                        return;
-                    }
-                    if (!silent) toast("已加载 " + view.Count + " 首歌曲");
-
-                    if (auto != null)
-                    {
-                        Track hit = FindByPath(view, auto) ?? FindByPath(tracks, auto);
-                        if (hit != null) { playTrack(hit, true); return; }
-                    }
-
-                    // 恢复上次播放的曲目（不自动出声），否则定位到第一首
-                    string lastTrack = Settings.Get("lastTrack", "");
-                    Track restore = lastTrack.Length > 0 ? (FindByPath(view, lastTrack) ?? FindByPath(tracks, lastTrack)) : null;
-                    if (restore == null) restore = view[0];
-                    playTrack(restore, false);
-                }));
-            });
+                    MainViewModel.Dbg("Library.LoadDirectory FAIL: " + ex.Message);
+                    if (!silent) await SubmitAsync(() => toast("读取文件夹失败，请重试"), token, generation).ConfigureAwait(false);
+                    throw;
+                }
+                finally { isLoadingDir = false; }
+            }, cancellationToken);
         }
 
-        /// <summary>拖放 / 添加文件：追加导入。</summary>
-        public void ImportPaths(string[] paths, bool append)
+        public void ImportPaths(string[] paths, bool append) => _ = ImportPathsAsync(paths, append);
+
+        public Task ImportPathsAsync(string[] paths, bool append, CancellationToken cancellationToken = default)
         {
-            ThreadPool.QueueUserWorkItem(_ =>
+            string[] requested = paths == null ? Array.Empty<string>() : (string[])paths.Clone();
+            return queue.Enqueue(async token =>
             {
-                var files = new List<string>();
-                foreach (string p in paths)
+                try
                 {
-                    try
+                    var files = new List<string>();
+                    foreach (string path in requested)
                     {
-                        if (Directory.Exists(p)) Library.EnumerateFiles(p, files, 0);
-                        else if (File.Exists(p)) files.Add(p);
+                        token.ThrowIfCancellationRequested();
+                        if (Directory.Exists(path)) Library.EnumerateFiles(path, files, 0, token);
+                        else if (File.Exists(path)) files.Add(path);
                     }
-                    catch { }
+                    var built = Library.BuildTracksIncremental(files, store, null, token);
+                    await SubmitAsync(() =>
+                    {
+                        // 拖放始终合并；同一队列保证之前扫描的最终 Replace 已完成。
+                        int added = vm.Playlist.AddRange(built);
+                        toast(added > 0 ? "已添加 " + added + " 首歌曲" : "没有新增的歌曲");
+                    }, token).ConfigureAwait(false);
                 }
-                List<Track> built = Library.BuildTracksIncremental(files, store, null);   // 追加导入：只 upsert 不清理
-                win.Dispatcher.BeginInvoke((Action)(() =>
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
                 {
-                    int added = vm.Playlist.AddRange(built);   // 去重 + 单次批量刷新（唯一数据源）
-                    if (added > 0) toast("已添加 " + added + " 首歌曲");
-                    else toast("没有新增的歌曲");
-                }));
-            });
+                    MainViewModel.Dbg("Library.ImportPaths FAIL: " + ex.Message);
+                    await SubmitAsync(() => toast("添加文件失败，请重试"), token).ConfigureAwait(false);
+                    throw;
+                }
+            }, cancellationToken);
+        }
+
+        async Task SubmitAsync(Action action, CancellationToken token, long? generation = null)
+        {
+            token.ThrowIfCancellationRequested();
+            if (closed || win.Dispatcher.HasShutdownStarted || win.Dispatcher.HasShutdownFinished) return;
+            await win.Dispatcher.InvokeAsync(() =>
+            {
+                if (!closed && !token.IsCancellationRequested &&
+                    (!generation.HasValue || generation.Value == Interlocked.Read(ref directoryGeneration))) action();
+            }, DispatcherPriority.Normal, token).Task.ConfigureAwait(false);
+        }
+
+        void PreserveCurrentTrack(List<Track> tracks)
+        {
+            Track current = vm.CurrentTrack;
+            if (current == null) return;
+            for (int i = 0; i < tracks.Count; i++)
+                if (LibraryPath.Same(tracks[i].FilePath, current.FilePath)) { tracks[i] = current; break; }
         }
 
         public static Track FindByPath(IEnumerable<Track> list, string path)
         {
-            foreach (Track t in list)
-                if (string.Equals(t.FilePath, path, StringComparison.OrdinalIgnoreCase)) return t;
+            if (string.IsNullOrEmpty(path)) return null;
+            foreach (Track track in list)
+                if (LibraryPath.Same(track.FilePath, path)) return track;
             return null;
+        }
+
+        public void Dispose()
+        {
+            if (closed) return;
+            closed = true;
+            vm.PropertyChanged -= OnPlaybackChanged;
+            win.Closed -= OnClosed;
+            queue.Dispose();
         }
     }
 }

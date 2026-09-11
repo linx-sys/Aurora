@@ -23,6 +23,10 @@
     <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(PublishSingleFile)' == 'true'">
+    <DefineConstants>$(DefineConstants);AURORA_SINGLE_FILE</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
     <!-- ui.xaml 编译为 BAML（P3 完成：编译期校验 + 启动提速） -->
     <Page Include="src\ui.xaml" />
@@ -31,6 +35,9 @@
   <ItemGroup>
     <Compile Include="src\App.cs" />
     <Compile Include="src\AppInfo.cs" />
+    <Compile Include="src\InstallManifest.cs" />
+    <Compile Include="src\InstallTransaction.cs" />
+    <Compile Include="src\OwnedInstallFile.cs" />
     <Compile Include="src\AnimatedStackPanel.cs" />
     <Compile Include="src\Assoc.cs" />
     <Compile Include="src\CoverArt.cs" />

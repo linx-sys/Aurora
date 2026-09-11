@@ -12,10 +12,13 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -48,7 +51,7 @@ namespace Aurora
             try { SetProcessDPIAware(); } catch { }
 
             // ---- 静默模式 ----
-            bool silent = false, assoc = true, desktop = true;
+            bool silent = false, assoc = true, desktop = true, recoverOnly = false;
             string dir = DefaultDir();
             // 正确处理 /D= 路径含空格和引号的边界情况
             for (int i = 0; i < args.Length; i++)
@@ -86,17 +89,35 @@ namespace Aurora
                     dir = dir.TrimEnd('\\', '/', ' ', '\t');
                     if (dir.Length == 2 && char.IsLetter(dir[0]) && dir[1] == ':') dir += "\\";
                 }
+                else if (string.Equals(arg, "/recover", StringComparison.OrdinalIgnoreCase)) recoverOnly = true;
                 else if (string.Equals(arg, "/noassoc", StringComparison.OrdinalIgnoreCase)) assoc = false;
                 else if (string.Equals(arg, "/nodesktop", StringComparison.OrdinalIgnoreCase)) desktop = false;
             }
 
+            if (recoverOnly)
+            {
+                try
+                {
+                    using var recovery = new InstallTransaction(dir);
+                    recovery.Recover();
+                    if (!silent) MessageBox.Show("文件恢复已完成。已提交但未完成登记的安装请在原目录重试安装。", "Aurora");
+                    Environment.Exit(0);
+                }
+                catch (Exception ex)
+                {
+                    if (silent) Console.Error.WriteLine(ex);
+                    else MessageBox.Show("恢复未完成：" + ex.Message, "Aurora");
+                    Environment.Exit(1);
+                }
+                return;
+            }
             if (silent)
             {
                 string[] silentExts = assoc
                     ? new[] { ".mp3", ".m4a", ".flac", ".wav", ".ogg", ".oga", ".aac", ".opus", ".wma" }
                     : null;
                 try { RunInstall(dir, desktop, silentExts, null); Environment.Exit(0); }
-                catch (Exception ex) { MessageBox.Show(ex.Message, "Aurora 安装失败"); Environment.Exit(1); }
+                catch (Exception ex) { Console.Error.WriteLine("Aurora 安装失败：" + ex.Message); Environment.Exit(1); }
                 return;
             }
 
@@ -112,92 +133,73 @@ namespace Aurora
                 "Programs", "AuroraPlayer");
         }
 
-        /// <summary>校验安装目录：绝对路径、无非法字符、不在系统关键目录。</summary>
         static bool IsSafeInstallDir(string dir, out string full)
         {
             full = null;
-            if (string.IsNullOrWhiteSpace(dir)) return false;
             try
             {
-                if (dir.IndexOfAny(Path.GetInvalidPathChars()) >= 0) return false;
-                if (!Path.IsPathRooted(dir)) return false;
-                full = Path.GetFullPath(dir);
+                full = InstallManifest.ValidateInstallDirectory(dir);
+                // 这里只检查路径；事务恢复必须先于非空目录检查，由 RunInstall 统一执行。
+                return true;
             }
             catch { return false; }
-            string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            string sys32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
-            if (full.Equals(win, StringComparison.OrdinalIgnoreCase)) return false;
-            if (full.StartsWith(sys32, StringComparison.OrdinalIgnoreCase)) return false;
-            if (full.TrimEnd('\\').Length <= 3) return false; // 盘根，如 C:\
-            return true;
         }
 
         /* ============================================================
          * 安装执行
          * ============================================================ */
 
-        static void EmitResource(string resName, string targetFile)
+        static byte[] ReadResource(string name)
         {
-            // 规范化目标路径，确保落在安装目录内
-            string targetPath = Path.GetFullPath(targetFile);
-            using (Stream s = Assembly.GetExecutingAssembly().GetManifestResourceStream(resName))
-            {
-                if (s == null) throw new Exception("缺少内嵌资源 " + resName);
-                var buf = new byte[s.Length];
-                using (var ms = new MemoryStream())
-                {
-                    int n;
-                    while ((n = s.Read(buf, 0, buf.Length)) > 0) ms.Write(buf, 0, n);
-                    File.WriteAllBytes(targetPath, ms.ToArray());
-                }
-            }
+            using Stream source = Assembly.GetExecutingAssembly().GetManifestResourceStream("Aurora." + name)
+                ?? throw new InvalidDataException("缺少内嵌资源 " + name);
+            using var buffer = new MemoryStream();
+            source.CopyTo(buffer);
+            return buffer.ToArray();
         }
 
-        static void RunInstall(string dirRaw, bool desktopShortcut, string[] selectedExts, Action<int, string> progress)
+        static void RunInstall(string dirRaw, bool desktopShortcut, string[] selectedExts, Action<int, string> progress,
+            CancellationToken cancellationToken = default)
         {
-            // 规范化安装目录
-            string dir = Path.GetFullPath(dirRaw);
-
-            if (progress != null) progress(5, "准备安装目录…");
-            Directory.CreateDirectory(dir);
-
+            string dir = InstallManifest.ValidateInstallDirectory(dirRaw);
+            using var transaction = new InstallTransaction(dir);
+            // 先恢复异常退出留下的事务，再判断目标目录是否为有效安装。
+            transaction.Recover();
+            InstallManifest.ValidateInstallDestination(dir);
+            cancellationToken.ThrowIfCancellationRequested();
+            string manifestPath = Path.Combine(dir, InstallManifest.FileName);
             string exePath = Path.Combine(dir, ExeName);
             string uninsPath = Path.Combine(dir, "unins.exe");
-
-            // 若播放器正在运行，先结束
-            try { foreach (var p in Process.GetProcessesByName("AuroraPlayer")) p.Kill(); } catch { }
-            try { foreach (var p in Process.GetProcessesByName("unins")) p.Kill(); } catch { }
-
-            if (progress != null) progress(25, "正在释放程序文件…");
-            EmitResource("Aurora.AuroraPlayer.exe", exePath);
-            EmitResource("Aurora.AuroraPlayer.dll", Path.Combine(dir, "AuroraPlayer.dll"));
-            EmitResource("Aurora.AuroraPlayer.runtimeconfig.json", Path.Combine(dir, "AuroraPlayer.runtimeconfig.json"));
-            EmitResource("Aurora.AuroraPlayer.deps.json", Path.Combine(dir, "AuroraPlayer.deps.json"));
-            if (progress != null) progress(45, "正在释放卸载器…");
-            EmitResource("Aurora.unins.exe", uninsPath);
-            EmitResource("Aurora.unins.runtimeconfig.json", Path.Combine(dir, "unins.runtimeconfig.json"));
-            EmitResource("Aurora.unins.deps.json", Path.Combine(dir, "unins.deps.json"));
-            // 释放第三方依赖 DLL（全部 MIT 许可证）
-            EmitResource("Aurora.NVorbis.dll", Path.Combine(dir, "NVorbis.dll"));
-            EmitResource("Aurora.Concentus.dll", Path.Combine(dir, "Concentus.dll"));
-            EmitResource("Aurora.Concentus.Oggfile.dll", Path.Combine(dir, "Concentus.Oggfile.dll"));
-            EmitResource("Aurora.NAudio.dll", Path.Combine(dir, "NAudio.dll"));
-            EmitResource("Aurora.NAudio.Core.dll", Path.Combine(dir, "NAudio.Core.dll"));
-            EmitResource("Aurora.NAudio.WinMM.dll", Path.Combine(dir, "NAudio.WinMM.dll"));
-            EmitResource("Aurora.NAudio.Wasapi.dll", Path.Combine(dir, "NAudio.Wasapi.dll"));
-            // WinRT 投影（SMTC 媒体键需要）
-            EmitResource("Aurora.Microsoft.Windows.SDK.NET.dll", Path.Combine(dir, "Microsoft.Windows.SDK.NET.dll"));
-            EmitResource("Aurora.WinRT.Runtime.dll", Path.Combine(dir, "WinRT.Runtime.dll"));
-            // SQLite（媒体库缓存，MIT）：原生 e_sqlite3 释放到应用根目录供 SQLitePCLRaw 探测
-            EmitResource("Aurora.Microsoft.Data.Sqlite.dll", Path.Combine(dir, "Microsoft.Data.Sqlite.dll"));
-            EmitResource("Aurora.SQLitePCLRaw.core.dll", Path.Combine(dir, "SQLitePCLRaw.core.dll"));
-            EmitResource("Aurora.SQLitePCLRaw.provider.e_sqlite3.dll", Path.Combine(dir, "SQLitePCLRaw.provider.e_sqlite3.dll"));
-            EmitResource("Aurora.SQLitePCLRaw.batteries_v2.dll", Path.Combine(dir, "SQLitePCLRaw.batteries_v2.dll"));
-            EmitResource("Aurora.e_sqlite3.dll", Path.Combine(dir, "e_sqlite3.dll"));
+            string oldDesktopHash = null, oldStartMenuHash = null;
+            using (var oldKey = Registry.CurrentUser.OpenSubKey(InstallManifest.RegistryPath))
+            {
+                if (InstallManifest.SamePath(dir, oldKey?.GetValue("InstallLocation") as string))
+                {
+                    oldDesktopHash = oldKey.GetValue("DesktopShortcutSha256") as string;
+                    oldStartMenuHash = oldKey.GetValue("StartMenuShortcutSha256") as string;
+                }
+            }
+            var payload = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            foreach (string name in InstallManifest.PayloadFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                payload.Add(name, ReadResource(name));
+            }
+            if (selectedExts != null && selectedExts.Length > 0)
+                payload.Add(".associate", Encoding.UTF8.GetBytes(selectedExts.Length >= 9 ? "1" : string.Join(",", selectedExts)));
+            InstallManifest.CloseInstalledProcess(exePath);
+            InstallManifest.CloseInstalledProcess(uninsPath);
+            progress?.Invoke(5, "准备安装事务与备份…");
+            int emitted = 0;
+            var manifest = transaction.Execute(payload, Version, cancellationToken, stage =>
+            {
+                if (stage.StartsWith("applied:", StringComparison.Ordinal))
+                    progress?.Invoke(Math.Min(55, 10 + (++emitted * 40 / payload.Count)), "正在提交安装文件…");
+                else progress?.Invoke(5, "正在准备可恢复备份…");
+            });
 
             if (progress != null) progress(60, "正在写入注册表…");
-            using (var k = Registry.CurrentUser.CreateSubKey(string.Join(
-                "\\", "Software", "Microsoft", "Windows", "CurrentVersion", "Uninstall", "AuroraPlayer")))
+            using (var k = Registry.CurrentUser.CreateSubKey(InstallManifest.RegistryPath))
             {
                 k.SetValue("DisplayName", "Aurora 极光音乐");
                 k.SetValue("DisplayVersion", Version);
@@ -207,52 +209,51 @@ namespace Aurora
                 k.SetValue("UninstallString", string.Format("\"{0}\"", uninsPath));
                 k.SetValue("NoModify", 1, RegistryValueKind.DWord);
                 k.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-                // EstimatedSize 按安装目录实际文件合计（KB），始终与真实体积一致
-                long totalBytes = 0;
-                foreach (string f in Directory.GetFiles(dir))
-                {
-                    try { totalBytes += new FileInfo(f).Length; } catch { }
-                }
-                k.SetValue("EstimatedSize", (int)(totalBytes / 1024), RegistryValueKind.DWord); // KB
+                long totalBytes = manifest.Files.Sum(f => new FileInfo(InstallManifest.ResolveFile(dir, f.RelativePath)).Length);
+                k.SetValue("EstimatedSize", (int)(totalBytes / 1024), RegistryValueKind.DWord);
+                k.SetValue("ManifestSha256", InstallManifest.HashFile(manifestPath));
+                k.DeleteValue("DesktopShortcutSha256", false);
+                k.DeleteValue("StartMenuShortcutSha256", false);
             }
 
             if (progress != null) progress(80, "正在创建快捷方式…");
-            CreateShortcut(exePath, dir, "Aurora Player.lnk", false);
-            if (desktopShortcut) CreateShortcut(exePath, dir, "Aurora Player.lnk", true);
-
-            if (selectedExts != null && selectedExts.Length > 0)
+            string startMenuHash = CreateShortcut(exePath, dir, "Aurora Player.lnk", false, oldStartMenuHash);
+            string desktopHash = desktopShortcut ? CreateShortcut(exePath, dir, "Aurora Player.lnk", true, oldDesktopHash) : oldDesktopHash;
+            using (var k = Registry.CurrentUser.OpenSubKey(InstallManifest.RegistryPath, true))
             {
-                if (progress != null) progress(90, "正在准备文件关联…");
-                // 标记文件：播放器首次启动时读取并注册文件关联（见 App.Main）
-                // 内容为 "1"（全部 9 种）或逗号分隔的扩展名列表
-                string content = selectedExts.Length >= 9 ? "1" : string.Join(",", selectedExts);
-                File.WriteAllText(Path.GetFullPath(Path.Combine(dir, ".associate")), content);
+                if (startMenuHash != null) k.SetValue("StartMenuShortcutSha256", startMenuHash);
+                if (desktopHash != null) k.SetValue("DesktopShortcutSha256", desktopHash);
             }
 
             if (progress != null) progress(100, "安装完成");
         }
 
         /// <summary>通过 IShellLink COM 接口创建 .lnk 快捷方式。</summary>
-        static void CreateShortcut(string exePath, string workDir, string name, bool desktop)
+        static string CreateShortcut(string exePath, string workDir, string name, bool desktop, string previousHash)
         {
+            IShellLinkW link = null;
             try
             {
                 string folder = desktop
                     ? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
                     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Aurora Player");
-                Directory.CreateDirectory(folder);
                 string lnkPath = Path.Combine(folder, name);
-
-                IShellLinkW link = (IShellLinkW)new ShellLinkComObject();
+                InstallManifest.EnsureNoReparsePoints(lnkPath);
+                // 不覆盖同名用户快捷方式；保留此前确认由本安装器创建的记录。
+                if (File.Exists(lnkPath)) return InstallManifest.FileMatches(lnkPath, previousHash) ? previousHash : null;
+                Directory.CreateDirectory(folder);
+                InstallManifest.EnsureNoReparsePoints(folder);
+                link = (IShellLinkW)new ShellLinkComObject();
                 link.SetPath(exePath);
                 link.SetWorkingDirectory(workDir);
                 link.SetIconLocation(exePath, 0);
                 link.SetDescription("Aurora 极光音乐");
                 IPersistFile persist = (IPersistFile)link;
                 persist.Save(lnkPath, true);
-                Marshal.ReleaseComObject(link);
+                return InstallManifest.HashFile(lnkPath);
             }
-            catch { /* 快捷方式失败不阻断安装 */ }
+            catch { return null; /* 快捷方式失败不阻断安装 */ }
+            finally { if (link != null) Marshal.ReleaseComObject(link); }
         }
 
         /* ============================================================
@@ -279,6 +280,19 @@ namespace Aurora
             ProgressBar bar;
             Label barLabel;
             Image logo;
+            CancellationTokenSource installCancellation;
+            bool installing;
+
+            protected override void OnFormClosing(FormClosingEventArgs e)
+            {
+                if (installing)
+                {
+                    e.Cancel = true;
+                    installCancellation?.Cancel();
+                    barLabel.Text = "正在取消并恢复安装前状态…";
+                }
+                base.OnFormClosing(e);
+            }
 
             protected override void OnHandleCreated(EventArgs e)
             {
@@ -582,32 +596,44 @@ namespace Aurora
                 string dir;
                 if (!IsSafeInstallDir(dirBox.Text.Trim().Trim('"'), out dir))
                 {
-                    MessageBox.Show("请输入有效的安装目录（绝对路径，且不位于系统目录）");
+                    MessageBox.Show("请选择安全的专用目录：不能使用磁盘根目录、个人目录本身、系统目录或链接目录。非空旧版本目录没有有效安装清单时，请选择新的空目录。");
                     return;
                 }
                 ShowPage(pageProgress);
-                btnClose.Enabled = false;
+                installing = true;
+                installCancellation = new CancellationTokenSource();
+                btnClose.Enabled = true;
                 try
                 {
                     // 收集选中的格式扩展名
                     var sel = new System.Collections.Generic.List<string>();
-                    if (chkAssoc.Checked)
-                        foreach (var cb in fmtChecks)
-                            if (cb.Checked) sel.Add((string)cb.Tag);
+                    foreach (var cb in fmtChecks)
+                        if (cb.Checked) sel.Add((string)cb.Tag);
                     string[] selectedExts = sel.Count > 0 ? sel.ToArray() : null;
                     RunInstall(dir, chkDesktop.Checked, selectedExts, (pct, msg) =>
                     {
                         bar.Value = pct;
                         barLabel.Text = msg;
                         Application.DoEvents();
-                    });
+                    }, installCancellation.Token);
                     ShowPage(pageDone);
+                }
+                catch (OperationCanceledException)
+                {
+                    MessageBox.Show("安装已取消，已恢复安装前的文件状态。", "Aurora", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    ShowPage(pageOptions);
                 }
                 catch (Exception ex)
                 {
-                    btnClose.Enabled = true;
-                    MessageBox.Show("安装失败：" + ex.Message, "Aurora", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("安装未完成：" + ex.Message + "\n请保留恢复目录，在原目录重试；不要清空安装目录。", "Aurora", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     ShowPage(pageOptions);
+                }
+                finally
+                {
+                    installing = false;
+                    btnClose.Enabled = true;
+                    installCancellation.Dispose();
+                    installCancellation = null;
                 }
             }
         }

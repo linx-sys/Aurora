@@ -55,7 +55,7 @@ namespace Aurora
         public int InputCount { get { return _inputs.Count; } }
 
         /// <summary>引擎 Dispose 时调用：停止预载后台行为。</summary>
-        public void MarkDisposed() { _disposed = true; }
+        public void MarkDisposed() { _disposed = true; DisposePreloaded(); }
 
         /* ---------- 输入集合 ---------- */
 
@@ -116,15 +116,17 @@ namespace Aurora
         /// <summary>构建一条曲目输入：优先取预载解码器，否则现开；归一化 + 增益包络。</summary>
         public TrackInput? BuildInput(string path, long session, float rgLinear)
         {
+            WaveStream? reader = null;
             try
             {
-                WaveStream reader = TakePreloaded(path) ?? _decoder(path);
+                reader = TakePreloaded(path) ?? _decoder(path);
                 ISampleProvider normalized = AudioDecoders.NormalizeToMixer(reader.ToSampleProvider());
                 var gain = new GainFadeSampleProvider(normalized) { BaseGain = rgLinear };
                 return new TrackInput { SessionId = session, Path = path, Reader = reader, Gain = gain };
             }
             catch (Exception ex)
             {
+                try { reader?.Dispose(); } catch { }
                 MainViewModel.Dbg("BuildInput FAIL: " + path + " -> " + ex.GetType().Name + ": " + ex.Message);
                 return null;
             }

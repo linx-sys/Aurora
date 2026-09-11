@@ -82,7 +82,9 @@ namespace Aurora
             app.DispatcherUnhandledException += (s, e) =>
             {
                 LogCrash("DispatcherUnhandledException", e.Exception);
-                e.Handled = true;   // 尽量不闪退；若状态已损坏由用户手动重启
+                // 未知异常不能假定可恢复：记录后遵循 WPF 未处理异常终止语义。
+                // 可恢复错误应在业务边界捕获并反馈，而不是全局吞掉。
+                e.Handled = false;
             };
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
                 LogCrash("AppDomain.UnhandledException (terminating=" + e.IsTerminating + ")", e.ExceptionObject as Exception);
@@ -101,13 +103,7 @@ namespace Aurora
 
         static void LogCrash(string source, Exception? ex)
         {
-            try
-            {
-                File.AppendAllText(
-                    Path.Combine(Path.GetTempPath(), "aurora_crash.log"),
-                    "\r\n==== " + DateTime.Now + "  [" + source + "] ====\r\n" + ex);
-            }
-            catch { }
+            Logger.Crash(source, ex);
         }
 
         static void ForwardToRunning(string path)

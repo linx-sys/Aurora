@@ -1,16 +1,3 @@
-/* ============================================================
- * LibraryDatabase.cs — 媒体库 SQLite 正式核心存储（ILibraryStore 实现）
- * P1（评审建议 #5/#6）：指纹缓存解决"每次启动/换目录都要全量解析标签"；
- * P1-3 升级为正式存储：启动 DB 优先秒开列表，后台扫描做指纹差分同步。
- * 扫描按指纹（文件大小 + 最后写入时间 UTC）命中直接
- * 复用元数据，未命中才重新解析并回写；目录中已消失的文件清理过期行。
- *
- * 只缓存"贵的"数据：标签文本、时长、标签内嵌封面。
- * lrc 文本与外部封面兜底（联网匹配缓存/同名 jpg）保持每次现读——
- * 它们会在缓存写入之后发生变化（联网匹配后到），缓存反而会吃掉更新。
- *
- * 依赖：Microsoft.Data.Sqlite（自动携带 e_sqlite3 原生库）。
- * ============================================================ */
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -18,103 +5,122 @@ using Microsoft.Data.Sqlite;
 
 namespace Aurora
 {
-    /// <summary>tracks 表行（缓存 DTO，与 Track 解耦以便测试）。</summary>
+    /// <summary>Windows 路径身份；不要求文件存在，非法/测试伪路径保留为文本。</summary>
+    public static class LibraryPath
+    {
+        public static string Normalize(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return "";
+            string value = path.Replace('/', '\\');
+            try { value = Path.GetFullPath(value); }
+            catch (ArgumentException) { }
+            catch (NotSupportedException) { }
+            catch (PathTooLongException) { }
+            return value.TrimEnd('\\');
+        }
+
+        public static string Key(string path) => Normalize(path).ToUpperInvariant();
+        public static bool Same(string a, string b) => string.Equals(Normalize(a), Normalize(b), StringComparison.OrdinalIgnoreCase);
+        public static bool IsUnder(string path, string directory) => Normalize(path).StartsWith(Normalize(directory) + "\\", StringComparison.OrdinalIgnoreCase);
+    }
+
     public class TrackRow
     {
-        public string Path = null!;     // 主键
+        public string Path = null!;
         public string FileName = null!;
         public string? Title;
         public string? Artist;
         public string? Album;
-        public double DurationSeconds; // 0 = 未知
-        public long Bytes;             // 指纹之一
-        public long LastModified;      // 指纹之二：LastWriteTimeUtc.Ticks
-        public byte[]? Cover;           // 标签内嵌封面（可为 null）
-        public double? TrackGain;      // ReplayGain 2.0 增益 dB（null=未分析）
-        public double? TrackPeak;      // 采样峰值（防削波钳制用）
+        public double DurationSeconds;
+        public long Bytes;
+        public long LastModified;
+        public byte[]? Cover;
+        public double? TrackGain;
+        public double? TrackPeak;
     }
 
-    /// <summary>
-    /// 媒体库 SQLite 存储（ILibraryStore 唯一实现）。
-    /// P1-3 升级：由"扫描缓存"升级为库数据持久化权威层——
-    /// 启动 DB 优先秒开列表，后台扫描指纹差分同步（见 LibraryImportController）。
-    /// </summary>
-    public class LibraryDatabase : ILibraryStore
+    /// <summary>单连接、锁内串行访问；WAL 提供崩溃恢复及跨连接读写能力，不使本实例并行。</summary>
+    public class LibraryDatabase : ILibraryStore, IDisposable
     {
         readonly string _dbPath;
         SqliteConnection? _conn;
         readonly object _lock = new object();
+        bool _disposed;
+        const string Columns = "path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak";
 
-        /// <summary>默认库路径：%APPDATA%\AuroraPlayer\library.db。</summary>
-        public static string DefaultPath
-        {
-            get { return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "AuroraPlayer", "library.db"); }
-        }
+        public static string DefaultPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AuroraPlayer", "library.db");
 
-        public LibraryDatabase(string dbPath)
-        {
-            _dbPath = dbPath ?? DefaultPath;
-        }
+        public LibraryDatabase(string dbPath) { _dbPath = dbPath ?? DefaultPath; }
 
         void EnsureOpen()
         {
+            if (_disposed) throw new ObjectDisposedException(nameof(LibraryDatabase));
             if (_conn != null) return;
-            var dir = Path.GetDirectoryName(_dbPath);
+            string? dir = Path.GetDirectoryName(_dbPath);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-
-            _conn = new SqliteConnection(new SqliteConnectionStringBuilder
+            var connection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                DataSource = _dbPath,
-                Mode = SqliteOpenMode.ReadWriteCreate,
+                DataSource = _dbPath, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false
             }.ToString());
-            _conn.Open();
-
-            using (var cmd = _conn!.CreateCommand())
+            try
             {
-                // WAL：后台扫描写 + UI 读不互相阻塞
-                cmd.CommandText = "PRAGMA journal_mode=WAL;";
-                cmd.ExecuteNonQuery();
-            }
-            using (var cmd = _conn!.CreateCommand())
-            {
-                cmd.CommandText = @"
-CREATE TABLE IF NOT EXISTS tracks (
-    path          TEXT PRIMARY KEY,
-    file_name     TEXT NOT NULL,
-    title         TEXT,
-    artist        TEXT,
-    album         TEXT,
-    duration      REAL NOT NULL DEFAULT 0,
-    bytes         INTEGER NOT NULL DEFAULT 0,
-    last_modified INTEGER NOT NULL DEFAULT 0,
-    cover         BLOB
-);
-CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
-                cmd.ExecuteNonQuery();
-            }
-
-            // 迁移：ReplayGain 列（旧库补列）
-            using (var cmd = _conn!.CreateCommand())
-            {
-                cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='track_gain'";
-                long exists = Convert.ToInt64(cmd.ExecuteScalar());
-                if (exists == 0)
+                connection.Open();
+                using (var cmd = connection.CreateCommand())
                 {
-                    cmd.CommandText = "ALTER TABLE tracks ADD COLUMN track_gain REAL; ALTER TABLE tracks ADD COLUMN track_peak REAL;";
+                    cmd.CommandText = "PRAGMA journal_mode=WAL;";
                     cmd.ExecuteNonQuery();
                 }
+                using (var tx = connection.BeginTransaction())
+                using (var cmd = connection.CreateCommand())
+                {
+                    cmd.Transaction = tx;
+                    cmd.CommandText = @"CREATE TABLE IF NOT EXISTS tracks (
+path TEXT PRIMARY KEY, file_name TEXT NOT NULL, title TEXT, artist TEXT, album TEXT,
+duration REAL NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
+last_modified INTEGER NOT NULL DEFAULT 0, cover BLOB);";
+                    cmd.ExecuteNonQuery();
+                    var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    cmd.CommandText = "PRAGMA table_info(tracks);";
+                    using (var reader = cmd.ExecuteReader())
+                        while (reader.Read()) columns.Add(reader.GetString(1));
+                    foreach (string column in new[] { "track_gain", "track_peak", "path_key" })
+                    {
+                        if (columns.Contains(column)) continue;
+                        cmd.CommandText = "ALTER TABLE tracks ADD COLUMN " + column + (column == "path_key" ? " TEXT;" : " REAL;");
+                        cmd.ExecuteNonQuery();
+                    }
+                    // 不合并或删除旧库中仅大小写不同的行，保留全部原始元数据。
+                    var pending = new List<string>();
+                    cmd.CommandText = "SELECT path FROM tracks WHERE path_key IS NULL;";
+                    using (var reader = cmd.ExecuteReader())
+                        while (reader.Read()) pending.Add(reader.GetString(0));
+                    foreach (string path in pending)
+                    {
+                        cmd.Parameters.Clear();
+                        cmd.CommandText = "UPDATE tracks SET path_key=$key WHERE path=$path;";
+                        cmd.Parameters.AddWithValue("$key", LibraryPath.Key(path));
+                        cmd.Parameters.AddWithValue("$path", path);
+                        cmd.ExecuteNonQuery();
+                    }
+                    cmd.Parameters.Clear();
+                    cmd.CommandText = "CREATE INDEX IF NOT EXISTS idx_tracks_path_key ON tracks(path_key);";
+                    cmd.ExecuteNonQuery();
+                    cmd.CommandText = "PRAGMA user_version;";
+                    if (Convert.ToInt64(cmd.ExecuteScalar()) < 2)
+                    {
+                        cmd.CommandText = "PRAGMA user_version=2;";
+                        cmd.ExecuteNonQuery();
+                    }
+                    tx.Commit();
+                }
+                _conn = connection;
             }
+            catch { connection.Dispose(); throw; }
         }
 
-        /// <summary>指纹命中判定：大小与最后写入时间均未变化。</summary>
         public static bool FingerprintMatches(TrackRow? row, long bytes, long lastModifiedUtcTicks)
-        {
-            return row != null && row.Bytes == bytes && row.LastModified == lastModifiedUtcTicks;
-        }
+            => row != null && row.Bytes == bytes && row.LastModified == lastModifiedUtcTicks;
 
-        /// <summary>按路径取缓存行；无缓存返回 null。</summary>
         public TrackRow? TryGet(string path)
         {
             if (string.IsNullOrEmpty(path)) return null;
@@ -123,18 +129,19 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
                 EnsureOpen();
                 using (var cmd = _conn!.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak FROM tracks WHERE path=$p";
-                    cmd.Parameters.AddWithValue("$p", path);
-                    using (var r = cmd.ExecuteReader())
-                    {
-                        if (!r.Read()) return null;
-                        return ReadRow(r);
-                    }
+                    cmd.CommandText = "SELECT " + Columns + " FROM tracks WHERE path_key=$key ORDER BY last_modified DESC, path;";
+                    cmd.Parameters.AddWithValue("$key", LibraryPath.Key(path));
+                    using (var reader = cmd.ExecuteReader())
+                        while (reader.Read())
+                        {
+                            var row = ReadRow(reader);
+                            if (LibraryPath.Same(row.Path, path)) return row;
+                        }
                 }
+                return null;
             }
         }
 
-        /// <summary>取目录前缀下的所有缓存行（增量扫描清理过期行用）。</summary>
         public List<TrackRow> GetByPrefix(string dirPrefix)
         {
             var result = new List<TrackRow>();
@@ -144,42 +151,29 @@ CREATE INDEX IF NOT EXISTS idx_tracks_prefix ON tracks(path);";
                 EnsureOpen();
                 using (var cmd = _conn!.CreateCommand())
                 {
-                    // 前缀匹配在 C# 侧做（OrdinalIgnoreCase），SQL 只做范围过滤走索引
-                    cmd.CommandText = "SELECT path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak FROM tracks WHERE path >= $lo AND path < $hi";
-                    cmd.Parameters.AddWithValue("$lo", dirPrefix);
-                    cmd.Parameters.AddWithValue("$hi", dirPrefix + "\uffff");
-                    using (var r = cmd.ExecuteReader())
-                    {
-                        while (r.Read()) result.Add(ReadRow(r));
-                    }
+                    string prefix = LibraryPath.Key(dirPrefix) + "\\";
+                    // '\\' 的下一个 ASCII 字符是 ']'；此上界包含任意 Unicode 后缀。
+                    cmd.CommandText = "SELECT " + Columns + " FROM tracks WHERE path_key >= $lo AND path_key < $hi ORDER BY last_modified DESC, path;";
+                    cmd.Parameters.AddWithValue("$lo", prefix);
+                    cmd.Parameters.AddWithValue("$hi", prefix.Substring(0, prefix.Length - 1) + "]");
+                    var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    using (var reader = cmd.ExecuteReader())
+                        while (reader.Read())
+                        {
+                            var row = ReadRow(reader);
+                            if (LibraryPath.IsUnder(row.Path, dirPrefix) && seen.Add(LibraryPath.Normalize(row.Path))) result.Add(row);
+                        }
                 }
             }
             return result;
         }
 
-        /// <summary>写入或更新一行（按路径主键）。</summary>
         public void Upsert(TrackRow row)
         {
             if (row == null || string.IsNullOrEmpty(row.Path)) return;
-            lock (_lock)
-            {
-                EnsureOpen();
-                using (var cmd = _conn!.CreateCommand())
-                {
-                    cmd.CommandText = @"
-INSERT INTO tracks(path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak)
-VALUES($path,$file_name,$title,$artist,$album,$duration,$bytes,$last_modified,$cover,$track_gain,$track_peak)
-ON CONFLICT(path) DO UPDATE SET
-    file_name=$file_name, title=$title, artist=$artist, album=$album,
-    duration=$duration, bytes=$bytes, last_modified=$last_modified, cover=$cover,
-    track_gain=$track_gain, track_peak=$track_peak";
-                    Bind(cmd, row);
-                    cmd.ExecuteNonQuery();
-                }
-            }
+            UpsertMany(new[] { row });
         }
 
-        /// <summary>批量写入（单事务；整目录扫描后一次性回写）。</summary>
         public void UpsertMany(IEnumerable<TrackRow> rows)
         {
             if (rows == null) return;
@@ -187,42 +181,20 @@ ON CONFLICT(path) DO UPDATE SET
             {
                 EnsureOpen();
                 using (var tx = _conn!.BeginTransaction())
-                using (var cmd = _conn!.CreateCommand())
+                using (var cmd = _conn.CreateCommand())
                 {
                     cmd.Transaction = tx;
-                    cmd.CommandText = @"
-INSERT INTO tracks(path,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak)
-VALUES($path,$file_name,$title,$artist,$album,$duration,$bytes,$last_modified,$cover,$track_gain,$track_peak)
-ON CONFLICT(path) DO UPDATE SET
-    file_name=$file_name, title=$title, artist=$artist, album=$album,
-    duration=$duration, bytes=$bytes, last_modified=$last_modified, cover=$cover,
-    track_gain=$track_gain, track_peak=$track_peak";
-                    var pPath = cmd.CreateParameter(); pPath.ParameterName = "$path"; cmd.Parameters.Add(pPath);
-                    var pName = cmd.CreateParameter(); pName.ParameterName = "$file_name"; cmd.Parameters.Add(pName);
-                    var pTitle = cmd.CreateParameter(); pTitle.ParameterName = "$title"; cmd.Parameters.Add(pTitle);
-                    var pArtist = cmd.CreateParameter(); pArtist.ParameterName = "$artist"; cmd.Parameters.Add(pArtist);
-                    var pAlbum = cmd.CreateParameter(); pAlbum.ParameterName = "$album"; cmd.Parameters.Add(pAlbum);
-                    var pDur = cmd.CreateParameter(); pDur.ParameterName = "$duration"; cmd.Parameters.Add(pDur);
-                    var pBytes = cmd.CreateParameter(); pBytes.ParameterName = "$bytes"; cmd.Parameters.Add(pBytes);
-                    var pMtime = cmd.CreateParameter(); pMtime.ParameterName = "$last_modified"; cmd.Parameters.Add(pMtime);
-                    var pCover = cmd.CreateParameter(); pCover.ParameterName = "$cover"; cmd.Parameters.Add(pCover);
-                    var pGain = cmd.CreateParameter(); pGain.ParameterName = "$track_gain"; cmd.Parameters.Add(pGain);
-                    var pPeak = cmd.CreateParameter(); pPeak.ParameterName = "$track_peak"; cmd.Parameters.Add(pPeak);
-
                     foreach (var row in rows)
                     {
                         if (row == null || string.IsNullOrEmpty(row.Path)) continue;
-                        pPath.Value = row.Path;
-                        pName.Value = row.FileName ?? "";
-                        pTitle.Value = (object?)row.Title ?? DBNull.Value;
-                        pArtist.Value = (object?)row.Artist ?? DBNull.Value;
-                        pAlbum.Value = (object?)row.Album ?? DBNull.Value;
-                        pDur.Value = row.DurationSeconds;
-                        pBytes.Value = row.Bytes;
-                        pMtime.Value = row.LastModified;
-                        pCover.Value = (object?)row.Cover ?? DBNull.Value;
-                        pGain.Value = (object?)row.TrackGain ?? DBNull.Value;
-                        pPeak.Value = (object?)row.TrackPeak ?? DBNull.Value;
+                        cmd.Parameters.Clear();
+                        Bind(cmd, row);
+                        cmd.CommandText = @"UPDATE tracks SET file_name=$file_name,title=$title,artist=$artist,album=$album,
+duration=$duration,bytes=$bytes,last_modified=$last_modified,cover=$cover,track_gain=$track_gain,track_peak=$track_peak
+WHERE path_key=$key;";
+                        if (cmd.ExecuteNonQuery() != 0) continue;
+                        cmd.CommandText = @"INSERT INTO tracks(path,path_key,file_name,title,artist,album,duration,bytes,last_modified,cover,track_gain,track_peak)
+VALUES($path,$key,$file_name,$title,$artist,$album,$duration,$bytes,$last_modified,$cover,$track_gain,$track_peak);";
                         cmd.ExecuteNonQuery();
                     }
                     tx.Commit();
@@ -230,7 +202,6 @@ ON CONFLICT(path) DO UPDATE SET
             }
         }
 
-        /// <summary>删除指定路径集合中的行。</summary>
         public void Delete(IEnumerable<string> paths)
         {
             if (paths == null) return;
@@ -238,14 +209,15 @@ ON CONFLICT(path) DO UPDATE SET
             {
                 EnsureOpen();
                 using (var tx = _conn!.BeginTransaction())
-                using (var cmd = _conn!.CreateCommand())
+                using (var cmd = _conn.CreateCommand())
                 {
                     cmd.Transaction = tx;
-                    cmd.CommandText = "DELETE FROM tracks WHERE path=$p";
-                    var p = cmd.CreateParameter(); p.ParameterName = "$p"; cmd.Parameters.Add(p);
+                    cmd.CommandText = "DELETE FROM tracks WHERE path_key=$key;";
+                    var parameter = cmd.Parameters.AddWithValue("$key", "");
                     foreach (string path in paths)
                     {
-                        p.Value = path;
+                        if (string.IsNullOrEmpty(path)) continue;
+                        parameter.Value = LibraryPath.Key(path);
                         cmd.ExecuteNonQuery();
                     }
                     tx.Commit();
@@ -253,48 +225,47 @@ ON CONFLICT(path) DO UPDATE SET
             }
         }
 
-        /// <summary>
-        /// 增量扫描清理：删除 dirPrefix 目录下不在 present 集合中的过期行。
-        /// 前缀按"目录边界"匹配（补全分隔符），避免 "D:\Music" 误伤 "D:\MusicBackup"。
-        /// 返回删除的行数。
-        /// </summary>
         public int DeleteMissingUnder(string dirPrefix, HashSet<string> presentPaths)
         {
             if (string.IsNullOrEmpty(dirPrefix)) return 0;
-            string prefix = dirPrefix;
-            if (!prefix.EndsWith("\\")) prefix += "\\";
-            var stale = new List<string>();
-            foreach (var row in GetByPrefix(dirPrefix))
+            lock (_lock)
             {
-                if (!row.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
-                if (presentPaths == null || !presentPaths.Contains(row.Path))
-                    stale.Add(row.Path);
+                var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (presentPaths != null)
+                    foreach (string path in presentPaths) present.Add(LibraryPath.Normalize(path));
+                var stale = new List<string>();
+                foreach (var row in GetByPrefix(dirPrefix))
+                    if (!present.Contains(LibraryPath.Normalize(row.Path))) stale.Add(row.Path);
+                if (stale.Count > 0) Delete(stale);
+                return stale.Count;
             }
-            if (stale.Count > 0) Delete(stale);
-            return stale.Count;
         }
 
-        static TrackRow ReadRow(SqliteDataReader r)
+        public void Dispose()
         {
-            return new TrackRow
+            lock (_lock)
             {
-                Path = r.GetString(0),
-                FileName = r.IsDBNull(1) ? "" : r.GetString(1),
-                Title = r.IsDBNull(2) ? null : r.GetString(2),
-                Artist = r.IsDBNull(3) ? null : r.GetString(3),
-                Album = r.IsDBNull(4) ? null : r.GetString(4),
-                DurationSeconds = r.IsDBNull(5) ? 0 : r.GetDouble(5),
-                Bytes = r.IsDBNull(6) ? 0 : r.GetInt64(6),
-                LastModified = r.IsDBNull(7) ? 0 : r.GetInt64(7),
-                Cover = r.IsDBNull(8) ? null : (byte[])r.GetValue(8),
-                TrackGain = r.IsDBNull(9) ? (double?)null : r.GetDouble(9),
-                TrackPeak = r.IsDBNull(10) ? (double?)null : r.GetDouble(10),
-            };
+                if (_disposed) return;
+                _disposed = true;
+                _conn?.Dispose();
+                _conn = null;
+            }
         }
+
+        static TrackRow ReadRow(SqliteDataReader r) => new TrackRow
+        {
+            Path = r.GetString(0), FileName = r.IsDBNull(1) ? "" : r.GetString(1),
+            Title = r.IsDBNull(2) ? null : r.GetString(2), Artist = r.IsDBNull(3) ? null : r.GetString(3),
+            Album = r.IsDBNull(4) ? null : r.GetString(4), DurationSeconds = r.IsDBNull(5) ? 0 : r.GetDouble(5),
+            Bytes = r.IsDBNull(6) ? 0 : r.GetInt64(6), LastModified = r.IsDBNull(7) ? 0 : r.GetInt64(7),
+            Cover = r.IsDBNull(8) ? null : (byte[])r.GetValue(8),
+            TrackGain = r.IsDBNull(9) ? (double?)null : r.GetDouble(9), TrackPeak = r.IsDBNull(10) ? (double?)null : r.GetDouble(10)
+        };
 
         static void Bind(SqliteCommand cmd, TrackRow row)
         {
             cmd.Parameters.AddWithValue("$path", row.Path);
+            cmd.Parameters.AddWithValue("$key", LibraryPath.Key(row.Path));
             cmd.Parameters.AddWithValue("$file_name", row.FileName ?? "");
             cmd.Parameters.AddWithValue("$title", (object?)row.Title ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$artist", (object?)row.Artist ?? DBNull.Value);

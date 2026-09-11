@@ -1,7 +1,16 @@
 /* ============================================================
  * AppInfo.cs — 应用元信息（版本 / 仓库地址）
- * 主程序与安装器共用（installer.csproj 也编译本文件）。
+ * 主程序、安装器与卸载器共用。
  * ============================================================ */
+using System.Runtime.Versioning;
+
+// GenerateAssemblyInfo 已关闭，显式声明与各工程目标框架一致的平台基线。
+#if WINDOWS10_0_19041_0_OR_GREATER
+[assembly: SupportedOSPlatform("windows10.0.17763.0")]
+#else
+[assembly: SupportedOSPlatform("windows7.0")]
+#endif
+
 namespace Aurora
 {
     public static class AppInfo
@@ -14,15 +23,18 @@ namespace Aurora
         public const string ReleasesApi = "https://api.github.com/repos/linx-sys/Aurora/releases/latest";
 
         /// <summary>
-        /// 是否便携版（P2-5 更新体验分流）：单文件发布（PublishSingleFile）时
-        /// EntryAssembly.Location 为空串；安装版运行 AuroraPlayer.dll，Location 非空。
+        /// 是否便携版（P2-5 更新体验分流）：由主程序的 PublishSingleFile 构建属性决定，
+        /// 避免依赖单文件包中不可用的程序集文件路径。
         /// </summary>
         public static bool IsPortable
         {
             get
             {
-                try { return string.IsNullOrEmpty(System.Reflection.Assembly.GetEntryAssembly()?.Location); }
-                catch { return false; }
+#if AURORA_SINGLE_FILE
+                return true;
+#else
+                return false;
+#endif
             }
         }
     }

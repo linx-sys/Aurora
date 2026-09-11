@@ -46,7 +46,7 @@ namespace Aurora
             {
                 // 字节 → 样本数 → 时间
                 long sampleOffset = value / (4 * _reader.Channels);
-                _reader.DecodedTime = TimeSpan.FromSeconds((double)sampleOffset / _reader.SampleRate);
+                _reader.TimePosition = TimeSpan.FromSeconds((double)sampleOffset / _reader.SampleRate);
                 _position = value;
             }
         }

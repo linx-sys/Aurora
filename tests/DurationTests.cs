@@ -149,7 +149,7 @@ namespace Aurora.Tests
             return path;
         }
 
-        string _temp;
+        string? _temp;
 
         public void Dispose()
         {

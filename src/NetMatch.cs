@@ -203,13 +203,21 @@ namespace Aurora
         /// 后台线程开始匹配；完成后回调 onDone（线程池线程，调用方需自行调度到 UI 线程）。
         /// 单曲全流程：按 Providers 顺序逐源尝试，第一个有结果的源生效。
         /// </summary>
-        public static void Start(string musicPath, string title, string artist, Action<NetMatchResult> onDone)
+        public static void Start(string musicPath, string title, string artist, Action<NetMatchResult> onDone,
+            CancellationToken cancellationToken = default)
         {
-            ThreadPool.QueueUserWorkItem(_ => RunCore(musicPath, title, artist, onDone));
+            if (cancellationToken.IsCancellationRequested) return;
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try { RunCore(musicPath, title, artist, onDone, cancellationToken); }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { MainViewModel.Dbg("NetMatch FAIL: " + ex.Message); }
+            });
         }
 
-        static void RunCore(string musicPath, string title, string artist, Action<NetMatchResult> onDone)
+        static void RunCore(string musicPath, string title, string artist, Action<NetMatchResult> onDone, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // 新缓存：基于归一化"歌手|标题"的 Key（避免同名歌曲重复缓存）
             // 旧缓存：基于文件路径的 Key（向后兼容，仅用于查找）
             string newLyricPath = GetLyricCachePathByMeta(title, artist);
@@ -235,17 +243,20 @@ namespace Aurora
                     string? lastError = null;
                     foreach (ILyricsProvider provider in Providers)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         if (!ProviderEnabled(provider)) continue;   // 数据源级开关（阶段 9）：禁用源直接跳过
                         try
                         {
-                            if (provider.Match(r, musicPath, title, artist))
+                            if (provider.Match(r, musicPath, title, artist, cancellationToken))
                             {
                                 r.Source = provider.Name;   // 命中源生效，不再尝试后续源
                                 break;
                             }
                         }
+                        catch (OperationCanceledException) { throw; }
                         catch (Exception ex)
                         {
+                            cancellationToken.ThrowIfCancellationRequested();
                             // 单源失效（网络异常/接口变更）自动降级到下一个
                             MainViewModel.Dbg("NetMatch provider " + provider.Name + " FAIL: " + ex.Message);
                             lastError = ex.Message;
@@ -261,13 +272,14 @@ namespace Aurora
                     }
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 r.Message = ex.Message;
             }
             finally
             {
-                if (onDone != null)
+                if (!cancellationToken.IsCancellationRequested && onDone != null)
                     try { onDone(r); } catch { }
             }
         }

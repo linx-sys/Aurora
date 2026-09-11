@@ -46,7 +46,7 @@ namespace Aurora.Tests
             return f;
         }
 
-        PlayerEngine CreateEngine(FakeAudioOutput fake = null, Func<string, WaveStream> decoder = null)
+        PlayerEngine CreateEngine(FakeAudioOutput? fake = null, Func<string, WaveStream>? decoder = null)
         {
             fake = fake ?? NewFake();
             string dummy = NewDummy();
@@ -323,7 +323,7 @@ namespace Aurora.Tests
         public void Preload_EmptyOrNullPath_NoOp()
         {
             var e = CreateEngine();
-            e.Preload(null);
+            e.Preload(null!);
             e.Preload("");
             Assert.True(e.Load(NewDummy()));   // 引擎不受影响
         }
@@ -500,7 +500,7 @@ namespace Aurora.Tests
         [Fact]
         public void OutputFactory_ReturnsNull_TreatedAsFailed()
         {
-            var e = new PlayerEngine(src => null, p => new FakeWaveStream(1.0));
+            var e = new PlayerEngine(src => null!, p => new FakeWaveStream(1.0));   // 故意模拟违约工厂。
             engines.Add(e);
             Assert.True(e.Load(NewDummy()));
             e.Play();
@@ -588,7 +588,7 @@ namespace Aurora.Tests
         public void StateChanged_AfterLoad_CarriesDuration()
         {
             var e = CreateEngine();
-            PlaybackStateChangedEventArgs last = null;
+            PlaybackStateChangedEventArgs? last = null;
             e.StateChanged += (s, a) => last = a;
             e.Load(NewDummy());
             Assert.NotNull(last);
@@ -660,7 +660,7 @@ namespace Aurora.Tests
         public void Load_NullOrEmptyPath_ReturnsFalse()
         {
             var e = CreateEngine();
-            Assert.False(e.Load(null));
+            Assert.False(e.Load(null!));
             Assert.False(e.Load(""));
         }
 
@@ -668,7 +668,7 @@ namespace Aurora.Tests
         public void CrossfadeTo_NullPath_ReturnsFalse()
         {
             var e = CreateEngine();
-            Assert.False(e.CrossfadeTo(null, 0.05));
+            Assert.False(e.CrossfadeTo(null!, 0.05));
         }
 
         [Fact]

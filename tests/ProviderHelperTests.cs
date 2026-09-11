@@ -3,7 +3,10 @@
  * 覆盖：歌名归一化（Normalize）、JSON 树解析与取值辅助
  *       （JObj/JGet/JArr/JStr/JLong/JInt）。不触网、不触盘。
  * ============================================================ */
+using System;
 using System.Collections.Generic;
+using System.Net.Http;
+using System.Threading;
 using Xunit;
 
 namespace Aurora.Tests
@@ -15,16 +18,47 @@ namespace Aurora.Tests
         public override bool Match(NetMatchResult r, string musicPath, string title, string artist) { return false; }
 
         public static string Norm(string s) { return Normalize(s); }
-        public static Dictionary<string, object> Parse(string json) { return JObj(json); }
-        public static object Get(object o, string key) { return JGet(o, key); }
-        public static object[] Arr(object o) { return JArr(o); }
-        public static string Str(object o) { return JStr(o); }
-        public static long L(object o) { return JLong(o); }
-        public static int I(object o) { return JInt(o); }
+        public static Dictionary<string, object>? Parse(string json) { return JObj(json); }
+        public static object? Get(object? o, string key) { return JGet(o, key); }
+        public static object[]? Arr(object? o) { return JArr(o); }
+        public static string Str(object? o) { return JStr(o); }
+        public static long L(object? o) { return JLong(o); }
+        public static int I(object? o) { return JInt(o); }
+        public static HttpRequestMessage Request(string url, string? referer) { return NewRequest(url, referer); }
+        public static byte[] Download(string url, CancellationToken token) { return HttpGetBytes(url, null, token); }
     }
 
     public class ProviderHelperTests
     {
+        [Fact]
+        public void NewRequest_PreservesHeadersWithoutSharingReferer()
+        {
+            using var request = ProviderHelperAccessor.Request("https://example.invalid/song", "https://example.invalid/");
+            using var withoutReferer = ProviderHelperAccessor.Request("https://example.invalid/cover", null);
+
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.NotNull(request.RequestUri);
+            Assert.Equal("/song", request.RequestUri.AbsolutePath);
+            Assert.NotEmpty(request.Headers.UserAgent);
+            Assert.Contains(request.Headers.Accept, value => value.MediaType == "application/json");
+            Assert.Contains(request.Headers.Accept, value => value.MediaType == "text/plain");
+            Assert.Contains(request.Headers.Accept, value => value.MediaType == "*/*");
+            Assert.Equal(new Uri("https://example.invalid/"), request.Headers.Referrer);
+            Assert.Null(withoutReferer.Headers.Referrer);
+        }
+
+        [Fact]
+        public void HttpGetBytes_PreCanceledRequestDoesNotConnect()
+        {
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+
+            var error = Assert.Throws<OperationCanceledException>(() =>
+                ProviderHelperAccessor.Download("https://example.invalid/song", cancellation.Token));
+
+            Assert.Equal(cancellation.Token, error.CancellationToken);
+        }
+
         /* ---------------- Normalize ---------------- */
 
         [Theory]
@@ -45,7 +79,7 @@ namespace Aurora.Tests
             // 实现直接对 null 调用 s.Length 会抛异常——调用方均保证非空，这里仅验证行为约定
             try
             {
-                var r = ProviderHelperAccessor.Norm(null);
+                var r = ProviderHelperAccessor.Norm(null!);
                 Assert.Equal("", r);
             }
             catch (System.NullReferenceException) { /* 可接受：上游保证非空 */ }
@@ -60,6 +94,7 @@ namespace Aurora.Tests
             Assert.NotNull(o);
             var a = ProviderHelperAccessor.Get(o, "a");
             var arr = ProviderHelperAccessor.Arr(ProviderHelperAccessor.Get(a, "b"));
+            Assert.NotNull(arr);
             Assert.Equal(2, arr.Length);
             Assert.Equal(1L, arr[0]);
             Assert.Equal("x", ProviderHelperAccessor.Get(o, "s"));

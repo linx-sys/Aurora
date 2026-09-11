@@ -50,7 +50,7 @@ namespace Aurora.Tests
         [Fact]
         public void NullOrEmptyExt_Enabled()
         {
-            Assert.True(NetMatch.IsEnabledForExt(null, _ => "0"));
+            Assert.True(NetMatch.IsEnabledForExt(null!, _ => "0"));
             Assert.True(NetMatch.IsEnabledForExt("", _ => "0"));
         }
 

@@ -10,10 +10,13 @@
  * ============================================================ */
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Aurora
 {
-    public class PlaybackCoordinator
+    public class PlaybackCoordinator : IDisposable
     {
         readonly IPlaybackService _player;
         readonly ILibraryStore _library;
@@ -22,6 +25,12 @@ namespace Aurora
         readonly Action<Action> _ui;          // UI 线程调度（VM 传 Dispatcher.BeginInvoke；测试传内联）
 
         readonly HashSet<string> _rgScanning = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        readonly LibraryWorkQueue _rgQueue = new LibraryWorkQueue();
+
+        /// <summary>已排队响度任务的完成快照；Dispose 后可等待其安全退出再关闭数据库。</summary>
+        public Task Completion => _rgQueue.Completion;
+        readonly Func<string, CancellationToken, Loudness.Result?> _analyze;
+        volatile bool _disposed;
         Track? _pendingNext;                   // 预载决策的下一首
         Track? _current;
 
@@ -30,18 +39,22 @@ namespace Aurora
 
         /// <summary>播放状态同步（参数 = 是否播放中；引擎事件驱动，UI 线程回调）。</summary>
         public event EventHandler<bool>? PlayStateChanged;
+        public event EventHandler<string>? PlaybackError;
 
         public PlaybackCoordinator(IPlaybackService player, ILibraryStore library,
-            PlaylistManager playlist, Action<Action> ui)
+            PlaylistManager playlist, Action<Action> ui,
+            Func<string, CancellationToken, Loudness.Result?>? analyze = null)
         {
             _player = player ?? throw new ArgumentNullException(nameof(player));
             _library = library ?? throw new ArgumentNullException(nameof(library));
             _playlist = playlist ?? throw new ArgumentNullException(nameof(playlist));
             _ui = ui ?? (a => a());
             _playback = new PlaybackController();
-
+            _analyze = analyze ?? Loudness.AnalyzeFile;
+            _playback.ModeChanged += OnModeChanged;
             _player.StateChanged += OnPlayerStateChanged;
             _player.PlaybackEnded += OnPlaybackEnded;
+            if (_player is IPlaybackErrorSource errors) errors.PlaybackError += OnPlaybackError;
         }
 
         /* ---------- 供 VM 透出的协作对象 ---------- */
@@ -57,7 +70,14 @@ namespace Aurora
         }
 
         public PlayMode ToggleMode() { return _playback.ToggleMode(); }
-        public void ResetShuffleHistory() { _playback.ResetShuffleHistory(); }
+        public void ResetShuffleHistory()
+        {
+            _pendingNext = null;
+            _playback.ResetShuffleHistory();
+            _playback.SetCurrent(_current);
+            if (_current != null && _playlist.Tracks.Contains(_current)) _playback.RecordPlay(_current);
+        }
+        void OnModeChanged(object? sender, EventArgs e) { _pendingNext = null; }
         public void RefreshView() { _playlist.RefreshView(); }
 
         public static bool ReplayGainEnabled { get { return Settings.Get("replaygain", "1") != "0"; } }
@@ -68,7 +88,8 @@ namespace Aurora
             get
             {
                 double d;
-                return double.TryParse(Settings.Get("crossfade", "0"), out d) ? Math.Max(0, Math.Min(12, d)) : 0;
+                return double.TryParse(Settings.Get("crossfade", "0"), NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out d) && double.IsFinite(d) ? Math.Clamp(d, 0, 12) : 0;
             }
         }
 
@@ -85,14 +106,13 @@ namespace Aurora
         /// <summary>播放指定曲目。recordHistory=false 用于沿随机轨迹回退/前进（不重复入栈）。</summary>
         public void PlayTrack(Track? t, bool autoplay, bool recordHistory)
         {
-            if (t == null) return;
+            if (_disposed || t == null) return;
             MainViewModel.Dbg("PlayTrack: " + t.Title + " autoplay=" + autoplay + " record=" + recordHistory);
             _pendingNext = null;   // 手动/显式切歌：作废预载决策
-            if (recordHistory) _playback.RecordPlay(t);
-            SetCurrent(t);
             bool loadOk = _player.Load(t.FilePath);
             if (!loadOk)
             {
+                _player.Stop();
                 SetCurrent(null);
                 RaisePlayState(false);
                 CurrentTrackChanged?.Invoke(this, new CurrentTrackChangedEventArgs
@@ -102,12 +122,14 @@ namespace Aurora
                 });
                 return;
             }
+            SetCurrent(t);
+            if (recordHistory) _playback.RecordPlay(t);
             if (t.Duration == TimeSpan.Zero && _player.Duration > TimeSpan.Zero)
                 t.Duration = _player.Duration;
             _player.Position = TimeSpan.Zero;
-            if (autoplay) { _player.Play(); RaisePlayState(true); }
-            else RaisePlayState(false);
             ApplyReplayGain(t);
+            if (autoplay) StartPlayback();
+            else RaisePlayState(_player.State == PlaybackState.Playing);
             CurrentTrackChanged?.Invoke(this, new CurrentTrackChangedEventArgs
             {
                 Track = t, AutoPlay = autoplay, LoadFailed = false
@@ -116,13 +138,35 @@ namespace Aurora
 
         public void TogglePlay()
         {
-            if (_player.State == PlaybackState.Playing) { _player.Pause(); RaisePlayState(false); }
-            else { _player.Play(); RaisePlayState(true); }
+            if (_disposed) return;
+            if (_player.State == PlaybackState.Playing)
+            {
+                _player.Pause();
+                RaisePlayState(_player.State == PlaybackState.Playing);
+            }
+            else StartPlayback();
+        }
+
+        void StartPlayback()
+        {
+            try { _player.Play(); }
+            catch (Exception ex)
+            {
+                _player.Stop();
+                PlaybackError?.Invoke(this, "无法开始播放：" + ex.Message);
+            }
+            bool playing = _player.State == PlaybackState.Playing;
+            RaisePlayState(playing);
+            if (!playing && !(_player is IPlaybackErrorSource))
+                PlaybackError?.Invoke(this, "播放未能开始，请检查音频输出设备后重试。");
         }
 
         public void NextTrack(bool manual)
         {
+            if (_disposed) return;
             var tracks = _playlist.Tracks;
+            _playback.ValidateHistory(tracks);
+            if (_pendingNext != null && !tracks.Contains(_pendingNext)) _pendingNext = null;
             if (tracks.Count == 0) return;
             Track? next;
             if (manual)
@@ -154,7 +198,9 @@ namespace Aurora
 
         public void PrevTrack()
         {
+            if (_disposed) return;
             var tracks = _playlist.Tracks;
+            _playback.ValidateHistory(tracks);
             if (tracks.Count == 0) return;
             // 随机模式：真正回退刚听过的歌（播放轨迹），而不是简单索引-1
             if (_playback.Mode == PlayMode.Shuffle && _playback.TryGetShufflePrev(out Track? prev))
@@ -168,9 +214,11 @@ namespace Aurora
 
         public void DeleteTrack(Track t)
         {
-            if (t == null) return;
+            if (_disposed || t == null) return;
             bool wasCurrent = t == _current;
             _playlist.Remove(t);
+            _pendingNext = null;
+            _playback.ValidateHistory(_playlist.Tracks);
             if (wasCurrent)
             {
                 _player.Stop();
@@ -185,9 +233,9 @@ namespace Aurora
 
         public void SeekTo(double ratio)
         {
-            if (_player.Duration > TimeSpan.Zero)
+            if (!_disposed && double.IsFinite(ratio) && _player.Duration > TimeSpan.Zero)
             {
-                _player.Position = TimeSpan.FromSeconds(ratio * _player.Duration.TotalSeconds);
+                _player.Position = TimeSpan.FromSeconds(Math.Clamp(ratio, 0, 1) * _player.Duration.TotalSeconds);
             }
         }
 
@@ -198,7 +246,8 @@ namespace Aurora
         public void PreloadNextIfNearEnd()
         {
             var tracks = _playlist.Tracks;
-            if (tracks.Count == 0 || _current == null || _player.State != PlaybackState.Playing) return;
+            if (_disposed || tracks.Count == 0 || _current == null || _player.State != PlaybackState.Playing) return;
+            if (_pendingNext != null && !tracks.Contains(_pendingNext)) _pendingNext = null;
             TimeSpan dur = _player.Duration;
             if (dur <= TimeSpan.Zero) return;
             double cf = CrossfadeSeconds;
@@ -233,7 +282,6 @@ namespace Aurora
         void CrossfadeToTrack(Track t)
         {
             MainViewModel.Dbg("CrossfadeTo: " + t.Title);
-            _playback.RecordPlay(t);
             bool ok = _player.CrossfadeTo(t.FilePath, CrossfadeSeconds);
             if (!ok)
             {
@@ -243,7 +291,8 @@ namespace Aurora
             if (t.Duration == TimeSpan.Zero && _player.Duration > TimeSpan.Zero)
                 t.Duration = _player.Duration;
             SetCurrent(t);
-            RaisePlayState(true);
+            _playback.RecordPlay(t);
+            RaisePlayState(_player.State == PlaybackState.Playing);
             ApplyReplayGain(t);
             CurrentTrackChanged?.Invoke(this, new CurrentTrackChangedEventArgs
             {
@@ -274,45 +323,53 @@ namespace Aurora
         }
 
         /// <summary>后台懒分析响度并回写 DB；完成后若仍是当前曲目则实时应用。</summary>
-        void ScheduleLoudnessScan(string path)
+        internal void ScheduleLoudnessScan(string path)
         {
             lock (_rgScanning)
             {
-                if (_rgScanning.Contains(path)) return;
-                _rgScanning.Add(path);
-            }
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
+                if (_disposed || !_rgScanning.Add(path)) return;
+                // 在同一把锁内登记任务，Dispose 不会漏掉刚接受的工作。
+                _ = _rgQueue.Enqueue(token =>
                 {
-                    Loudness.Result? r = Loudness.AnalyzeFile(path);
-                    if (r != null)
+                    try
                     {
-                        TrackRow? row = _library.TryGet(path)
-                            ?? new TrackRow { Path = path, FileName = System.IO.Path.GetFileName(path) };
-                        Library.GetFingerprint(path, out long bytes, out long mtime);
-                        if (row.Bytes == 0) row.Bytes = bytes;
-                        if (row.LastModified == 0) row.LastModified = mtime;
-                        row.TrackGain = r.GainDb;
-                        row.TrackPeak = r.Peak;
-                        _library.Upsert(row);
-                        MainViewModel.Dbg("RG scan done: " + path + " gain=" + r.GainDb.ToString("0.0") + "dB peak=" + r.Peak.ToString("0.00"));
-                        _ui(() =>
+                        token.ThrowIfCancellationRequested();
+                        Loudness.Result? r = _analyze(path, token);
+                        token.ThrowIfCancellationRequested();
+                        if (r != null)
                         {
-                            if (ReplayGainEnabled && _current != null &&
-                                string.Equals(_current.FilePath, path, StringComparison.OrdinalIgnoreCase))
+                            TrackRow? row = _library.TryGet(path)
+                                ?? new TrackRow { Path = path, FileName = System.IO.Path.GetFileName(path) };
+                            Library.GetFingerprint(path, out long bytes, out long mtime);
+                            if (row.Bytes == 0) row.Bytes = bytes;
+                            if (row.LastModified == 0) row.LastModified = mtime;
+                            row.TrackGain = r.GainDb;
+                            row.TrackPeak = r.Peak;
+                            lock (_rgScanning)
                             {
-                                _player.SetReplayGain((float)Loudness.LinearFor(r.GainDb, r.Peak));
+                                if (_disposed) return Task.CompletedTask;
+                                _library.Upsert(row);
                             }
-                        });
+                            MainViewModel.Dbg("RG scan done: " + path + " gain=" + r.GainDb.ToString("0.0") + "dB peak=" + r.Peak.ToString("0.00"));
+                            _ui(() =>
+                            {
+                                if (!_disposed && ReplayGainEnabled && _current != null &&
+                                    string.Equals(_current.FilePath, path, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    _player.SetReplayGain((float)Loudness.LinearFor(r.GainDb, r.Peak));
+                                }
+                            });
+                        }
                     }
-                }
-                catch (Exception ex) { MainViewModel.Dbg("RG scan FAIL: " + ex.Message); }
-                finally
-                {
-                    lock (_rgScanning) { _rgScanning.Remove(path); }
-                }
-            });
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+                    catch (Exception ex) { MainViewModel.Dbg("RG scan FAIL: " + ex.Message); }
+                    finally
+                    {
+                        lock (_rgScanning) { _rgScanning.Remove(path); }
+                    }
+                    return Task.CompletedTask;
+                });
+            }
         }
 
         /* ============================================================
@@ -323,8 +380,8 @@ namespace Aurora
         {
             _ui(() =>
             {
-                bool playing = e.State == PlaybackState.Playing;
-                RaisePlayState(playing);
+                if (_disposed) return;
+                RaisePlayState(_player.State == PlaybackState.Playing);
             });
         }
 
@@ -339,6 +396,7 @@ namespace Aurora
             MainViewModel.Dbg("PlaybackEnded bg: session=" + endedSession + " path=" + e.Path);
             _ui(() =>
             {
+                if (_disposed) return;
                 bool stale = _player.SessionId != endedSession;
                 MainViewModel.Dbg("PlaybackEnded ui: endedSession=" + endedSession + " currentSession=" + _player.SessionId + " stale=" + stale);
                 if (stale)
@@ -350,6 +408,28 @@ namespace Aurora
         void SetCurrent(Track? t)
         {
             _current = t;
+            _playback.SetCurrent(t);
+        }
+
+        void OnPlaybackError(object? sender, string message)
+        {
+            _ui(() => { if (!_disposed) PlaybackError?.Invoke(this, message); });
+        }
+
+        public void Dispose()
+        {
+            lock (_rgScanning)
+            {
+                if (_disposed) return;
+                _disposed = true;
+            }
+            _rgQueue.Dispose();
+            _pendingNext = null;
+            _player.StateChanged -= OnPlayerStateChanged;
+            _player.PlaybackEnded -= OnPlaybackEnded;
+            _playback.ModeChanged -= OnModeChanged;
+            if (_player is IPlaybackErrorSource errors) errors.PlaybackError -= OnPlaybackError;
+            // 队列取消活动/待处理工作，并在 Completion 完成后释放取消源。
         }
 
         void RaisePlayState(bool playing)

@@ -4,7 +4,9 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
+using System.Threading;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Media;
@@ -96,28 +98,31 @@ namespace Aurora
             return Array.IndexOf(AudioExt, e) >= 0;
         }
 
-        /// <summary>递归枚举目录下的音频与歌词文件。</summary>
-        public static void EnumerateFiles(string dir, List<string> outFiles, int depth)
+        /// <summary>返回是否完整枚举；权限/IO 错误、深度限制或跳过链接时禁止清理旧库。</summary>
+        public static bool EnumerateFiles(string dir, List<string> outFiles, int depth, CancellationToken cancellationToken = default)
         {
-            if (depth > 6) return;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (depth > 6) return false;
+            bool complete = true;
             try
             {
-                foreach (string f in Directory.GetFiles(dir))
+                foreach (string f in Directory.EnumerateFiles(dir))
                 {
-                    string e = Path.GetExtension(f).ToLowerInvariant();
-                    if (e == ".lrc" || IsAudio(f)) outFiles.Add(f);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (f.EndsWith(".lrc", StringComparison.OrdinalIgnoreCase) || IsAudio(f)) outFiles.Add(f);
+                }
+                foreach (string child in Directory.EnumerateDirectories(dir))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (depth == 6 || (File.GetAttributes(child) & FileAttributes.ReparsePoint) != 0)
+                        complete = false;
+                    else if (!EnumerateFiles(child, outFiles, depth + 1, cancellationToken)) complete = false;
                 }
             }
-            catch { }
-            if (depth < 6)
-            {
-                try
-                {
-                    foreach (string d in Directory.GetDirectories(dir))
-                        EnumerateFiles(d, outFiles, depth + 1);
-                }
-                catch { }
-            }
+            catch (OperationCanceledException) { throw; }
+            catch (IOException) { complete = false; }
+            catch (UnauthorizedAccessException) { complete = false; }
+            return complete;
         }
 
         /// <summary>文件指纹：大小 + 最后写入时间 UTC（增量扫描复用判定依据）。</summary>
@@ -144,34 +149,39 @@ namespace Aurora
         /// 标签元数据，未命中才解析并回写 DB；cleanupDir 非空时清理该目录下已消失文件的过期行。
         /// lrc 文本与外部封面兜底保持每次现读（联网匹配后会出现，不能缓存）。
         /// </summary>
-        public static List<Track> BuildTracksIncremental(IEnumerable<string> files, ILibraryStore? db, string? cleanupDir)
+        public static List<Track> BuildTracksIncremental(IEnumerable<string> files, ILibraryStore? db, string? cleanupDir,
+            CancellationToken cancellationToken = default, bool enumerationComplete = true)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var lrcMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var audio = new List<string>();
+            var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string f in files)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (f.EndsWith(".lrc", StringComparison.OrdinalIgnoreCase))
-                    lrcMap[Path.GetFileNameWithoutExtension(f)] = f;
-                else if (IsAudio(f)) audio.Add(f);
+                    lrcMap[LibraryPath.Normalize(Path.ChangeExtension(f, null))] = f;
+                else if (IsAudio(f) && present.Add(LibraryPath.Normalize(f))) audio.Add(f);
             }
 
             var result = new List<Track>();
             var toUpsert = new List<TrackRow>();
             foreach (string path in audio)
             {
-                try { result.Add(BuildOne(path, lrcMap, db, toUpsert)); } catch { }
+                cancellationToken.ThrowIfCancellationRequested();
+                try { result.Add(BuildOne(path, lrcMap, db, toUpsert, cancellationToken)); }
+                catch (OperationCanceledException) { throw; }
+                catch { enumerationComplete = false; }
             }
+            cancellationToken.ThrowIfCancellationRequested();
             result.Sort((a, b) => string.Compare(a.FileName, b.FileName, StringComparison.CurrentCultureIgnoreCase));
 
             if (db != null)
             {
                 if (toUpsert.Count > 0) db.UpsertMany(toUpsert);
-                if (!string.IsNullOrEmpty(cleanupDir))
-                {
-                    var present = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (Track t in result) present.Add(t.FilePath);
-                    db.DeleteMissingUnder(cleanupDir, present);
-                }
+                cancellationToken.ThrowIfCancellationRequested();
+                // present 来自枚举而不是解析结果：标签读取失败不等于文件已删除。
+                if (enumerationComplete && !string.IsNullOrEmpty(cleanupDir)) db.DeleteMissingUnder(cleanupDir, present);
             }
             return result;
         }
@@ -183,11 +193,13 @@ namespace Aurora
         /// = false：零探测快路径（P2 优化，启动 ① 用）——不查存在性（已删文件成为短命幽灵行，
         /// 由随后的差分同步清理）、不读 lrc/外部封面（由 ② 权威同步补齐），仅 DB 内数据。
         /// </summary>
-        public static List<Track> BuildTracksFromRows(IEnumerable<TrackRow> rows, bool probeExtras = true)
+        public static List<Track> BuildTracksFromRows(IEnumerable<TrackRow> rows, bool probeExtras = true, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var result = new List<Track>();
             foreach (TrackRow row in rows)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (row == null || string.IsNullOrEmpty(row.Path)) continue;
 
                 if (!probeExtras)
@@ -195,8 +207,9 @@ namespace Aurora
                     try
                     {
                         result.Add(FromMetadata(row.Path, row.Title, row.Artist, row.Album,
-                            TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, null, readFsExtras: false));
+                            TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, null, readFsExtras: false, cancellationToken: cancellationToken));
                     }
+                    catch (OperationCanceledException) { throw; }
                     catch { }
                     continue;
                 }
@@ -207,32 +220,37 @@ namespace Aurora
                 string baseName = Path.Combine(Path.GetDirectoryName(row.Path) ?? "", Path.GetFileNameWithoutExtension(row.Path));
                 string lrc = baseName + ".lrc";
                 if (!File.Exists(lrc)) lrc = baseName + Path.GetExtension(row.Path) + ".lrc";
-                if (File.Exists(lrc)) lrcMap[Path.GetFileNameWithoutExtension(row.Path)] = lrc;
+                if (File.Exists(lrc)) lrcMap[LibraryPath.Normalize(baseName)] = lrc;
 
                 try
                 {
                     result.Add(FromMetadata(row.Path, row.Title, row.Artist, row.Album,
-                        TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, lrcMap));
+                        TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, lrcMap, cancellationToken: cancellationToken));
                 }
+                catch (OperationCanceledException) { throw; }
                 catch { }
             }
+            cancellationToken.ThrowIfCancellationRequested();
             result.Sort((a, b) => string.Compare(a.FileName, b.FileName, StringComparison.CurrentCultureIgnoreCase));
             return result;
         }
 
         /// <summary>构建单条轨道：缓存命中走 FromMetadata 复用，未命中解析并记入回写队列。</summary>
-        static Track BuildOne(string path, Dictionary<string, string> lrcMap, ILibraryStore? db, List<TrackRow> toUpsert)
+        static Track BuildOne(string path, Dictionary<string, string> lrcMap, ILibraryStore? db, List<TrackRow> toUpsert, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             Library.GetFingerprint(path, out long bytes, out long mtime);
             TrackRow? row = db != null ? db.TryGet(path) : null;
             if (LibraryDatabase.FingerprintMatches(row, bytes, mtime))
             {
                 // 缓存命中：跳过昂贵的标签解析（ID3/FLAC/M4A/封面）
                 return FromMetadata(path, row!.Title, row.Artist, row.Album,
-                    TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, lrcMap);
+                    TimeSpan.FromSeconds(row.DurationSeconds), row.Cover, lrcMap, cancellationToken: cancellationToken);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             TrackMetadata meta = TagReaderService.Read(path);
+            cancellationToken.ThrowIfCancellationRequested();
             TimeSpan duration = meta.Duration ?? TimeSpan.Zero;
             if (db != null)
             {
@@ -249,7 +267,7 @@ namespace Aurora
                     Cover = meta.Cover,
                 });
             }
-            return FromMetadata(path, meta.Title, meta.Artist, meta.Album, duration, meta.Cover, lrcMap);
+            return FromMetadata(path, meta.Title, meta.Artist, meta.Album, duration, meta.Cover, lrcMap, cancellationToken: cancellationToken);
         }
 
         /// <summary>全量解析单文件并构建轨道（含 lrc 配对与外部封面兜底）。</summary>
@@ -263,8 +281,10 @@ namespace Aurora
         /// <summary>由元数据（解析所得或缓存复用）构建轨道；lrc 与外部封面兜底每次现读。
         /// readFsExtras=false 时不做任何文件系统访问（零探测快路径，P2 优化）。</summary>
         public static Track FromMetadata(string path, string? title, string? artist, string? album,
-            TimeSpan duration, byte[]? tagCover, Dictionary<string, string>? lrcMap, bool readFsExtras = true)
+            TimeSpan duration, byte[]? tagCover, Dictionary<string, string>? lrcMap, bool readFsExtras = true,
+            CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var t = new Track
             {
                 FilePath = path,
@@ -279,13 +299,16 @@ namespace Aurora
             if (duration > TimeSpan.Zero) t.Duration = duration;
             string ext = Path.GetExtension(path).ToLowerInvariant();
 
+            cancellationToken.ThrowIfCancellationRequested();
             if (readFsExtras) ApplyLrc(t, lrcMap);
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (t.Artist == null) t.Artist = "";
             if (t.Album == null) t.Album = "";
 
             // 外部封面兜底：缓存目录优先，同目录 .jpg 向后兼容
             if (readFsExtras) ApplyExternalCoverFallback(t);
+            cancellationToken.ThrowIfCancellationRequested();
             return t;
         }
 
@@ -296,11 +319,15 @@ namespace Aurora
             string ext = Path.GetExtension(path).ToLowerInvariant();
             string? lrc = NetMatch.FindLyricFile(path);
             if (lrc == null && lrcMap != null)
-                lrcMap.TryGetValue(Path.GetFileNameWithoutExtension(path), out lrc);
+            {
+                lrcMap.TryGetValue(LibraryPath.Normalize(Path.ChangeExtension(path, null)), out lrc);
+                if (lrc == null) lrcMap.TryGetValue(LibraryPath.Normalize(path), out lrc);
+            }
             if (lrc == null)
             {
-                string alt = path.Substring(0, path.Length - ext.Length) + ".mp3.lrc";
-                if (File.Exists(alt)) lrc = alt;
+                string sibling = Path.ChangeExtension(path, ".lrc");
+                if (File.Exists(sibling)) lrc = sibling;
+                else if (File.Exists(path + ".lrc")) lrc = path + ".lrc";
             }
             if (lrc != null)
             {
@@ -446,56 +473,124 @@ namespace Aurora
         }
     }
 
-    /// <summary>简易 INI 设置（%APPDATA%\AuroraPlayer\settings.ini）。</summary>
-    public static class Settings
+    /// <summary>可指定文件的设置存储。测试使用临时路径，不接触默认用户设置。</summary>
+    public sealed class SettingsStore
     {
-        static readonly string Dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AuroraPlayer");
-        static readonly string File_ = Path.Combine(Dir, "settings.ini");
-        static Dictionary<string, string>? _kv;
+        const string Header = ";Aurora.Settings.v2.base64";
+        readonly string filePath;
+        readonly object gate = new object();
+        Dictionary<string, string>? values;
 
-        static Dictionary<string, string> Load()
+        public SettingsStore(string path) { filePath = Path.GetFullPath(path); }
+
+        Dictionary<string, string> Load()
         {
-            if (_kv != null) return _kv;
-            _kv = new Dictionary<string, string>();
+            if (values != null) return values;
+            var loaded = new Dictionary<string, string>();
             try
             {
-                foreach (string line in File.ReadAllLines(File_))
+                string[] lines = File.ReadAllLines(filePath);
+                bool encoded = lines.Length > 0 && lines[0] == Header;
+                foreach (string line in lines)
                 {
-                    int i = line.IndexOf('=');
-                    if (i <= 0) continue;
-                    _kv[line.Substring(0, i).Trim()] = line.Substring(i + 1).Trim();
+                    int separator = line.IndexOf('=');
+                    if (separator <= 0) continue;
+                    string key = line.Substring(0, separator).Trim();
+                    string value = line.Substring(separator + 1);
+                    if (encoded)
+                    {
+                        try { value = Encoding.UTF8.GetString(Convert.FromBase64String(value)); }
+                        catch (FormatException) { continue; }
+                    }
+                    else value = value.Trim();
+                    loaded[key] = value;
                 }
             }
-            catch { }
-            return _kv;
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            return values = loaded;
         }
 
-        public static string Get(string key, string def)
+        public string Get(string key, string def)
         {
-            return Load().TryGetValue(key, out string? v) ? v! : def;
+            lock (gate) return Load().TryGetValue(key, out string? value) ? value : def;
         }
 
-        public static void Set(string key, string val)
+        public int GetInt(string key, int def, int min = int.MinValue, int max = int.MaxValue)
         {
-            Load()[key] = val;
-            try
+            return int.TryParse(Get(key, ""), NumberStyles.Integer, CultureInfo.InvariantCulture, out int value)
+                && value >= min && value <= max ? value : def;
+        }
+
+        public double GetDouble(string key, double def, double min = double.MinValue, double max = double.MaxValue)
+        {
+            string text = Get(key, "");
+            // 旧版部分调用用本地文化写入；兼容逗号小数，但不接受千位分组。
+            bool parsed = double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
+                || double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value);
+            return parsed && !double.IsNaN(value) && !double.IsInfinity(value) && value >= min && value <= max ? value : def;
+        }
+
+        public T GetEnum<T>(string key, T def) where T : struct, Enum
+        {
+            return Enum.TryParse<T>(Get(key, ""), true, out T value) && Enum.IsDefined(typeof(T), value) ? value : def;
+        }
+
+        public bool GetBool(string key, bool def)
+        {
+            string text = Get(key, "");
+            if (text == "1") return true;
+            if (text == "0") return false;
+            return bool.TryParse(text, out bool value) ? value : def;
+        }
+
+        public void Set(string key, string val)
+        {
+            if (string.IsNullOrWhiteSpace(key) || key.IndexOfAny(new[] { '=', '\r', '\n' }) >= 0)
+                throw new ArgumentException("设置键不能包含等号或换行", nameof(key));
+            lock (gate)
             {
-                Directory.CreateDirectory(Dir);
-                var sb = new StringBuilder();
-                foreach (var kv in _kv!) sb.Append(kv.Key).Append('=').Append(kv.Value).Append("\r\n");
-                File.WriteAllText(File_, sb.ToString());
-            }
-            catch (Exception ex)
-            {
-                // 写盘失败不能让播放器崩掉（内存中的 _kv 已更新），
-                // 但也不能完全静默——至少留下痕迹便于诊断"设置不生效"类问题
+                Load()[key] = val ?? "";
+                string? temporary = null;
                 try
                 {
-                    MainViewModel.Dbg("Settings.Set FAIL [" + key + "=" + val + "]: " + ex.Message);
+                    string directory = Path.GetDirectoryName(filePath)!;
+                    Directory.CreateDirectory(directory);
+                    temporary = Path.Combine(directory, ".settings-" + Guid.NewGuid().ToString("N") + ".tmp");
+                    var sb = new StringBuilder(Header).Append("\r\n");
+                    foreach (var entry in values!)
+                        sb.Append(entry.Key).Append('=').Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(entry.Value))).Append("\r\n");
+                    byte[] data = new UTF8Encoding(false).GetBytes(sb.ToString());
+                    using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        stream.Write(data, 0, data.Length);
+                        stream.Flush(true);
+                    }
+                    if (File.Exists(filePath)) File.Replace(temporary, filePath, null);
+                    else File.Move(temporary, filePath);
+                    temporary = null;
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    try { MainViewModel.Dbg("Settings.Set FAIL [" + key + "]: " + ex.Message); } catch { }
+                }
+                finally
+                {
+                    if (temporary != null) { try { File.Delete(temporary); } catch { } }
+                }
             }
         }
+    }
+
+    public static class Settings
+    {
+        static readonly SettingsStore Store = new SettingsStore(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AuroraPlayer", "settings.ini"));
+        public static string Get(string key, string def) => Store.Get(key, def);
+        public static int GetInt(string key, int def, int min = int.MinValue, int max = int.MaxValue) => Store.GetInt(key, def, min, max);
+        public static double GetDouble(string key, double def, double min = double.MinValue, double max = double.MaxValue) => Store.GetDouble(key, def, min, max);
+        public static T GetEnum<T>(string key, T def) where T : struct, Enum => Store.GetEnum(key, def);
+        public static bool GetBool(string key, bool def) => Store.GetBool(key, def);
+        public static void Set(string key, string val) => Store.Set(key, val);
     }
 }

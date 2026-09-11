@@ -30,6 +30,8 @@ namespace Aurora
         DispatcherTimer timer;
         bool seekingDrag;
         double lastTaskbarRatio = -1;
+        readonly System.Diagnostics.Stopwatch clock = new System.Diagnostics.Stopwatch();
+        double lastFrameSeconds;
 
         public PlaybackTickController(Window win, MainViewModel vm, IPlaybackService player, LyricsViewController lyrics,
             Grid seekHit, Border seekFill, Border seekTrackBg, Ellipse seekThumb,
@@ -54,9 +56,9 @@ namespace Aurora
             HookSeekDrag();
         }
 
-        public void Start() { timer.Start(); }
+        public void Start() { clock.Restart(); lastFrameSeconds = 0; timer.Start(); }
 
-        public void Stop() { try { timer?.Stop(); } catch { } }
+        public void Stop() { timer?.Stop(); clock.Stop(); }
 
         void HookSeekDrag()
         {
@@ -77,7 +79,7 @@ namespace Aurora
                     {
                         seekingDrag = false;
                         if (vm.CurrentTrack != null && (player.Duration > TimeSpan.Zero))
-                            player.Position = TimeSpan.FromSeconds(ratio * player.Duration.TotalSeconds);
+                            vm.SeekTo(ratio);
                         if (!seekHit.IsMouseOver) { seekTrackBg.Height = 4; seekFill.Height = 4; }
                     }
                 });
@@ -108,12 +110,17 @@ namespace Aurora
 
         void UiTick(object sender, EventArgs e)
         {
+            // 预载/跨淡必须周期巡检，而不是仅在联网匹配完成时调用。
+            if (vm.IsPlaying && !seekingDrag) vm.PreloadNextIfNearEnd();
             bool playing = vm.IsPlaying;
             Track current = vm.CurrentTrack;
+            double now = clock.Elapsed.TotalSeconds;
+            double elapsed = Math.Max(0, now - lastFrameSeconds);
+            lastFrameSeconds = now;
 
-            // 黑胶旋转（播放时约 10 秒/圈）
-            if (playing)
-                vinylRotate.Angle = (vinylRotate.Angle + 1.2) % 360;
+            // 按实际流逝时间旋转；最小化时跳过不必要的视觉更新。
+            if (playing && win.WindowState != WindowState.Minimized)
+                vinylRotate.Angle = (vinylRotate.Angle + 36 * elapsed) % 360;
 
             // 进度
             if ((player.Duration > TimeSpan.Zero) && current != null)

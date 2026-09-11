@@ -25,7 +25,7 @@ namespace Aurora.Tests
         {
             var c = new PlaybackController();
             Assert.Null(c.GetNextForManual(new List<Track>(), null));
-            Assert.Null(c.GetNextForManual(null, null));
+            Assert.Null(c.GetNextForManual(null!, null));
         }
 
         [Fact]
@@ -33,7 +33,7 @@ namespace Aurora.Tests
         {
             var c = new PlaybackController();
             Assert.Null(c.GetPrev(new List<Track>(), null));
-            Assert.Null(c.GetPrev(null, null));
+            Assert.Null(c.GetPrev(null!, null));
         }
 
         [Fact]
@@ -152,7 +152,7 @@ namespace Aurora.Tests
         public void Remove_Nonexistent_ReturnsFalse()
         {
             var pm = new PlaylistManager();
-            Assert.False(pm.Remove(null));
+            Assert.False(pm.Remove(null!));
             Assert.False(pm.Remove(T("missing.mp3")));
         }
 
@@ -160,7 +160,7 @@ namespace Aurora.Tests
         public void AddRange_NullOrEmpty_ReturnsZero()
         {
             var pm = new PlaylistManager();
-            Assert.Equal(0, pm.AddRange(null));
+            Assert.Equal(0, pm.AddRange(null!));
             Assert.Equal(0, pm.AddRange(new Track[0]));
         }
 
@@ -169,7 +169,7 @@ namespace Aurora.Tests
         {
             var pm = new PlaylistManager();
             pm.AddRange(new[] { T("a.mp3"), T("b.mp3") });
-            pm.SearchText = null;
+            pm.SearchText = null!;
             Assert.Equal(2, pm.View.Count);
         }
 

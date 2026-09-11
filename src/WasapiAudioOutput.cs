@@ -18,6 +18,7 @@ namespace Aurora
         {
             var device = new MMDeviceEnumerator().GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
             _wasapi = new WasapiOut(device, AudioClientShareMode.Exclusive, false, 150);
+            _wasapi.PlaybackStopped += (s, e) => PlaybackStopped?.Invoke(this, e);
             _wasapi.Init(source);
         }
 

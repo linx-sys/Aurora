@@ -20,8 +20,24 @@ namespace Aurora
         private readonly List<Track> _shuffleHistory = new List<Track>();   // 随机模式播放轨迹
         private int _shufflePos = -1;                                       // 轨迹当前位置
 
-        /// <summary>当前播放模式。</summary>
-        public PlayMode Mode { get; set; } = PlayMode.ListRepeat;
+        PlayMode _mode = PlayMode.ListRepeat;
+        Track? _current;
+        public event EventHandler? ModeChanged;
+
+        /// <summary>当前播放模式；非法持久化值回退到列表循环。</summary>
+        public PlayMode Mode
+        {
+            get { return _mode; }
+            set
+            {
+                var valid = Enum.IsDefined(typeof(PlayMode), value) ? value : PlayMode.ListRepeat;
+                if (_mode == valid) return;
+                _mode = valid;
+                ResetShuffleHistory();
+                if (_current != null) RecordPlay(_current);
+                ModeChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
 
         /// <summary>
         /// 获取下一首曲目（播放结束自动触发时使用）。
@@ -59,6 +75,7 @@ namespace Aurora
             prev = null;
             if (Mode != PlayMode.Shuffle || _shufflePos <= 0) return false;
             prev = _shuffleHistory[--_shufflePos];
+            _current = prev;
             return true;
         }
 
@@ -68,6 +85,7 @@ namespace Aurora
             next = null;
             if (Mode != PlayMode.Shuffle || _shufflePos >= _shuffleHistory.Count - 1) return false;
             next = _shuffleHistory[++_shufflePos];
+            _current = next;
             return true;
         }
 
@@ -77,9 +95,11 @@ namespace Aurora
         /// </summary>
         public void RecordPlay(Track t)
         {
-            if (Mode != PlayMode.Shuffle || t == null) return;
+            if (t == null) return;
+            _current = t;
+            if (Mode != PlayMode.Shuffle) return;
             int last = _shuffleHistory.Count - 1;
-            if (last >= 0 && ReferenceEquals(_shuffleHistory[last], t)) { _shufflePos = last; return; }
+            if (_shufflePos >= 0 && ReferenceEquals(_shuffleHistory[_shufflePos], t)) return;
             if (_shufflePos < last) _shuffleHistory.RemoveRange(_shufflePos + 1, last - _shufflePos);
             _shuffleHistory.Add(t);
             if (_shuffleHistory.Count > 200)
@@ -101,20 +121,29 @@ namespace Aurora
             _shufflePos = -1;
         }
 
+        public void SetCurrent(Track? current) { _current = current; }
+
+        /// <summary>删除或替换列表后剔除不再属于列表的历史项。</summary>
+        public void ValidateHistory(IList<Track> tracks)
+        {
+            for (int i = _shuffleHistory.Count - 1; i >= 0; i--)
+            {
+                if (tracks.Contains(_shuffleHistory[i])) continue;
+                _shuffleHistory.RemoveAt(i);
+                if (i <= _shufflePos) _shufflePos--;
+            }
+            if (_current != null && !tracks.Contains(_current)) _current = null;
+        }
+
         private Track? GetNextInternal(IList<Track> tracks, Track? current)
         {
             if (Mode == PlayMode.Shuffle)
             {
-                // 随机播放：避免连续重复同一首
-                if (tracks.Count == 1) return tracks[0];
-                Track next;
-                int guard = 0;
-                do
-                {
-                    next = tracks[_rng.Next(tracks.Count)];
-                    guard++;
-                } while (next == current && guard < 10);
-                return next;
+                // 直接在非当前曲目的候选集中均匀取样，不靠有限次数重抽。
+                var candidates = new List<Track>();
+                foreach (var track in tracks)
+                    if (!ReferenceEquals(track, current)) candidates.Add(track);
+                return candidates.Count == 0 ? tracks[0] : candidates[_rng.Next(candidates.Count)];
             }
             else
             {

@@ -22,6 +22,9 @@
   <ItemGroup>
     <Compile Include="src\AppInfo.cs" />
     <Compile Include="src\Installer.cs" />
+    <Compile Include="src\InstallManifest.cs" />
+    <Compile Include="src\InstallTransaction.cs" />
+    <Compile Include="src\OwnedInstallFile.cs" />
   </ItemGroup>
 
   <!-- 嵌入主程序 + 卸载器 + 运行时配置 + 第三方 DLL + 图标 -->
@@ -31,6 +34,7 @@
     <EmbeddedResource Include="build\AuroraPlayer.runtimeconfig.json" LogicalName="Aurora.AuroraPlayer.runtimeconfig.json" />
     <EmbeddedResource Include="build\AuroraPlayer.deps.json" LogicalName="Aurora.AuroraPlayer.deps.json" />
     <EmbeddedResource Include="build\unins.exe" LogicalName="Aurora.unins.exe" />
+    <EmbeddedResource Include="build\unins.dll" LogicalName="Aurora.unins.dll" />
     <EmbeddedResource Include="build\unins.runtimeconfig.json" LogicalName="Aurora.unins.runtimeconfig.json" />
     <EmbeddedResource Include="build\unins.deps.json" LogicalName="Aurora.unins.deps.json" />
     <EmbeddedResource Include="build\NVorbis.dll" LogicalName="Aurora.NVorbis.dll" />

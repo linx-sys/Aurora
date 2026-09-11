@@ -28,11 +28,14 @@ namespace Aurora
     /// 主视图模型。UI 通过 Binding 绑定属性，通过 ICommand 触发操作；
     /// 播放操作一律转发给 PlaybackCoordinator（唯一播放业务入口）。
     /// </summary>
-    public class MainViewModel : ViewModelBase
+    public class MainViewModel : ViewModelBase, IDisposable
     {
         private readonly IPlaybackService _player;   // 仅音量/静音透传（UI 状态，无流程逻辑）
         private readonly PlaybackCoordinator _coordinator;
         private readonly PlaylistManager _playlist;
+        private bool _disposed;
+        public event EventHandler<string> PlaybackError;
+        public System.Threading.Tasks.Task Completion => _coordinator.Completion;
 
         /// <summary>当前曲目变更事件（转发自协调器；UI 层订阅以更新歌词/封面/标题等）。</summary>
         public event EventHandler<CurrentTrackChangedEventArgs> CurrentTrackChanged;
@@ -60,9 +63,15 @@ namespace Aurora
 
             // 播放协调器（唯一播放业务入口）；引擎后台回调经 Dispatcher 切回 UI 线程
             _coordinator = new PlaybackCoordinator(player, library, _playlist,
-                action => dispatcher.BeginInvoke(action));
+                action =>
+                {
+                    if (_disposed || dispatcher.HasShutdownStarted) return;
+                    try { dispatcher.BeginInvoke(new Action(() => { if (!_disposed) action(); })); }
+                    catch (InvalidOperationException) when (_disposed || dispatcher.HasShutdownStarted) { }
+                });
             _coordinator.CurrentTrackChanged += OnCoordinatorCurrentTrackChanged;
-            _coordinator.PlayStateChanged += (s, playing) => IsPlaying = playing;
+            _coordinator.PlayStateChanged += OnCoordinatorPlayStateChanged;
+            _coordinator.PlaybackError += OnCoordinatorPlaybackError;
 
             InitCommands();
         }
@@ -95,7 +104,8 @@ namespace Aurora
             get { return _volume; }
             set
             {
-                if (SetProperty(ref _volume, Math.Max(0, Math.Min(1, value))))
+                if (!double.IsFinite(value)) value = _savedVolume;
+                if (SetProperty(ref _volume, Math.Clamp(value, 0, 1)))
                 {
                     _player.Volume = (float)_volume;
                     if (_volume > 0) _savedVolume = _volume;
@@ -269,6 +279,20 @@ namespace Aurora
             OnPropertyChanged(nameof(Title));
             OnPropertyChanged(nameof(Artist));
             CurrentTrackChanged?.Invoke(this, e);
+        }
+
+        void OnCoordinatorPlayStateChanged(object sender, bool playing) => IsPlaying = playing;
+        void OnCoordinatorPlaybackError(object sender, string message) => PlaybackError?.Invoke(this, message);
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _searchDebounce?.Stop();
+            _coordinator.CurrentTrackChanged -= OnCoordinatorCurrentTrackChanged;
+            _coordinator.PlayStateChanged -= OnCoordinatorPlayStateChanged;
+            _coordinator.PlaybackError -= OnCoordinatorPlaybackError;
+            _coordinator.Dispose();
         }
 
         internal static void Dbg(string msg)

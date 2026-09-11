@@ -49,7 +49,12 @@ namespace Aurora
     /// 音频播放引擎（IPlaybackService 唯一实现，协调层）。
     /// 频谱采样在 SpectrumCapture.cs、曲目输入/预载管理在 TrackInputManager.cs。
     /// </summary>
-    public class PlayerEngine : IPlaybackService
+    public interface IPlaybackErrorSource
+    {
+        event EventHandler<string>? PlaybackError;
+    }
+
+    public class PlayerEngine : IPlaybackService, IPlaybackErrorSource
     {
         IAudioOutput? _output;
         readonly Func<ISampleProvider, IAudioOutput> _outputFactory = null!;   // P1-4：输出设备工厂（测试注入 fake）
@@ -62,8 +67,10 @@ namespace Aurora
         long _sessionId;
         string? _currentPath;
         bool _disposed;
-        bool _deviceStopping;                // 主动 Stop 时忽略设备 PlaybackStopped
-        bool _outputFailed;                  // 设备初始化失败（不再重试，播放静默降级）
+        bool _outputFailed;                  // 最近一次输出失败；仅显式播放时重试
+        string? _lastOutputError;
+        volatile PlaybackState _state;
+        public event EventHandler<string>? PlaybackError;
         string _outputDescription = "未初始化";   // 诊断用（阶段 7）
         float _desiredVolume = 1.0f;         // 主音量（WaveOut.Volume，持久保持）
         float _rgLinear = 1f;                // ReplayGain 线性增益（新输入生效）
@@ -75,7 +82,7 @@ namespace Aurora
         public event EventHandler<SpectrumDataEventArgs>? SpectrumDataReady;
         public event EventHandler<PlaybackEndedEventArgs>? PlaybackEnded;
 
-        public PlaybackState State { get; private set; }
+        public PlaybackState State { get { return _state; } private set { _state = value; } }
 
         TrackInput? CurrentInput { get { return _inputs.Current; } }
 
@@ -144,14 +151,15 @@ namespace Aurora
             _mixer = new MixingSampleProvider(AudioDecoders.MixerFormat) { ReadFully = false };
             _mixer.MixerInputEnded += OnMixerInputEnded;
             _inputs = new TrackInputManager(_mixer, _decoder, _lock);
-            _capture = new SampleCaptureProvider(_mixer);
+            // 拉取与控制统一按引擎锁→混音器锁排序，避免结束回调造成锁反转。
+            _capture = new SampleCaptureProvider(new SynchronizedSampleProvider(_mixer, _lock));
             if (outputFactory != null)
             {
                 EnsureOutput();
             }
             else
             {
-                // 后台预热设备：不抢 UI 线程启动窗口；失败置 _outputFailed，播放时不再重试
+                // 后台预热设备：失败保留诊断，用户后续播放可再次尝试。
                 System.Threading.ThreadPool.QueueUserWorkItem(_ =>
                 {
                     lock (_lock) { if (!_disposed) EnsureOutput(); }
@@ -159,30 +167,54 @@ namespace Aurora
             }
         }
 
-        /// <summary>确保输出设备就绪（调用方需持 _lock）；失败置 _outputFailed 不再重试。</summary>
+        /// <summary>每次调用至多尝试创建一次输出；不自动循环重试。</summary>
         void EnsureOutput()
         {
-            if (_output != null || _outputFailed) return;
+            if (_output != null) return;
             try
             {
                 _output = _outputFactory(_capture);
-                if (_output != null)
-                {
-                    _output.Volume = _desiredVolume;
-                    _output.PlaybackStopped += OnDeviceStopped;
-                    _outputDescription = DescribeOutput(_output);
-                }
-                else
-                {
-                    _outputFailed = true;
-                    _outputDescription = "初始化失败（返回空）";
-                }
+                if (_output == null) throw new InvalidOperationException("输出设备初始化返回空");
+                _output.Volume = _desiredVolume;
+                _output.PlaybackStopped += OnDeviceStopped;
+                _outputDescription = DescribeOutput(_output);
+                _outputFailed = false;
+                _lastOutputError = null;
             }
             catch (Exception ex)
             {
-                _outputFailed = true;
-                _outputDescription = "初始化失败";
-                MainViewModel.Dbg("Output init FAIL: " + ex.Message);
+                FailOutput("输出设备初始化失败：" + ex.Message);
+            }
+        }
+
+        void FailOutput(string message)
+        {
+            _outputFailed = true;
+            _lastOutputError = message;
+            _outputDescription = message;
+            State = PlaybackState.Stopped;
+            IAudioOutput? failed = _output;
+            _output = null;
+            if (failed != null)
+            {
+                failed.PlaybackStopped -= OnDeviceStopped;
+                // 回调可能持有音频锁；Dispose 可能等待音频线程，必须移至锁外线程。
+                System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { failed.Dispose(); } catch { } });
+            }
+            MainViewModel.Dbg(message);
+            RaiseStateChanged();
+            PlaybackError?.Invoke(this, message + "。请检查输出设备后再次播放。");
+        }
+
+        sealed class SynchronizedSampleProvider : ISampleProvider
+        {
+            readonly ISampleProvider _source;
+            readonly object _gate;
+            public SynchronizedSampleProvider(ISampleProvider source, object gate) { _source = source; _gate = gate; }
+            public WaveFormat WaveFormat { get { return _source.WaveFormat; } }
+            public int Read(float[] buffer, int offset, int count)
+            {
+                lock (_gate) { return _source.Read(buffer, offset, count); }
             }
         }
 
@@ -224,11 +256,21 @@ namespace Aurora
                 if (_disposed) return false;
                 _sessionId++;
                 long session = _sessionId;
+                if (State == PlaybackState.Playing)
+                {
+                    try { _output?.Pause(); }
+                    catch (Exception ex) { FailOutput("停止旧曲目失败：" + ex.Message); }
+                }
                 _inputs.RemoveAll();
+                _currentPath = null;
+                State = PlaybackState.Stopped;
 
-                if (!File.Exists(path)) return false;
-                TrackInput? input = _inputs.BuildInput(path, session, _rgLinear);
-                if (input == null) return false;
+                TrackInput? input = File.Exists(path) ? _inputs.BuildInput(path, session, _rgLinear) : null;
+                if (input == null)
+                {
+                    RaiseStateChanged();
+                    return false;
+                }
                 _inputs.Add(input);   // 关键：接入混音器（缺失会导致 mixer 无输入→永久静音、进度不动）
 
                 _inputs.Current = input;
@@ -246,12 +288,13 @@ namespace Aurora
             lock (_lock)
             {
                 if (_disposed) return false;
-                _sessionId++;
-                long session = _sessionId;
+                long session = _sessionId + 1;
 
                 if (!File.Exists(path)) return false;
                 TrackInput? input = _inputs.BuildInput(path, session, _rgLinear);
                 if (input == null) return false;
+                _sessionId = session;
+                fadeSeconds = double.IsFinite(fadeSeconds) ? Math.Clamp(fadeSeconds, 0, 12) : 0;
 
                 input.Gain.BeginFadeIn(fadeSeconds);
                 _inputs.Add(input);
@@ -263,12 +306,8 @@ namespace Aurora
                     old.Gain.BeginFadeOut(0, fadeSeconds);
                 _inputs.ScheduleOldInputRemoval(old, fadeSeconds);
 
-                if (State != PlaybackState.Playing)
-                {
-                    State = PlaybackState.Playing;
-                    try { if (_output != null) _output.Play(); } catch { }
-                }
-                RaiseStateChanged();
+                if (State != PlaybackState.Playing) Play();
+                else RaiseStateChanged();
                 return true;
             }
         }
@@ -277,15 +316,18 @@ namespace Aurora
         {
             lock (_lock)
             {
-                if (_disposed) return;
+                if (_disposed || CurrentInput == null || State == PlaybackState.Playing) return;
                 EnsureOutput();
                 if (_output == null) return;
-                if (State != PlaybackState.Playing)
+                try
                 {
-                    try { _output.Play(); } catch { }
+                    _output.Play();
+                    // 某些设备会在 Play 内同步报告失败或流结束，不能覆盖该结果。
+                    if (_outputFailed || CurrentInput == null) return;
                     State = PlaybackState.Playing;
                     RaiseStateChanged();
                 }
+                catch (Exception ex) { FailOutput("无法开始播放：" + ex.Message); }
             }
         }
 
@@ -296,9 +338,14 @@ namespace Aurora
                 if (_disposed || _output == null) return;
                 if (State == PlaybackState.Playing)
                 {
-                    try { _output.Pause(); } catch { }
-                    State = PlaybackState.Paused;
-                    RaiseStateChanged();
+                    try
+                    {
+                        _output.Pause();
+                        if (_outputFailed) return;
+                        State = PlaybackState.Paused;
+                        RaiseStateChanged();
+                    }
+                    catch (Exception ex) { FailOutput("暂停播放失败：" + ex.Message); }
                 }
             }
         }
@@ -308,10 +355,11 @@ namespace Aurora
             lock (_lock)
             {
                 if (_disposed) return;
-                _deviceStopping = true;   // 主动停止：忽略设备 PlaybackStopped
-                _inputs.RemoveAll();
-                try { if (_output != null) _output.Stop(); } catch { }
+                _sessionId++;   // 作废已经排队的自然结束事件
                 State = PlaybackState.Stopped;
+                _inputs.RemoveAll();
+                try { _output?.Stop(); }
+                catch (Exception ex) { FailOutput("停止播放失败：" + ex.Message); }
                 RaiseStateChanged();
             }
         }
@@ -367,12 +415,16 @@ namespace Aurora
             }
         }
 
-        /// <summary>设备级 PlaybackStopped：只在主动 Stop()/Dispose() 时发生，直接忽略。</summary>
+        /// <summary>设备异常不是自然结束，不自动切歌或循环重试。</summary>
         void OnDeviceStopped(object? sender, StoppedEventArgs e)
         {
-            _deviceStopping = false;
-            // 自然结束走 OnMixerInputEnded；这里无需处理。
-            // （设备异常中断的场景由"播放无声"的用户感知 + 重启应用兜底，概率极低）
+            lock (_lock)
+            {
+                if (_disposed || !ReferenceEquals(sender, _output)) return;
+                if (e.Exception != null)
+                    FailOutput("音频设备中断：" + e.Exception.Message);
+                // 无异常停止可能迟于下一次 Load/Play；自然结束由混音器会话事件处理。
+            }
         }
 
         /// <summary>主动拉取当前频谱数据（由 UI 定时器调用，约 30fps）。</summary>
@@ -411,16 +463,23 @@ namespace Aurora
 
         public void Dispose()
         {
+            IAudioOutput? output;
             lock (_lock)
             {
                 if (_disposed) return;
                 _disposed = true;
-                _deviceStopping = true;
+                State = PlaybackState.Stopped;
                 _inputs.RemoveAll();
                 _inputs.MarkDisposed();
-                try { if (_output != null) _output.Dispose(); } catch { }
+                output = _output;
                 _output = null;
+                if (output != null) output.PlaybackStopped -= OnDeviceStopped;
+                _mixer.MixerInputEnded -= OnMixerInputEnded;
             }
+            if (System.Threading.Monitor.IsEntered(_lock))
+                System.Threading.ThreadPool.QueueUserWorkItem(_ => { try { output?.Dispose(); } catch { } });
+            else
+                try { output?.Dispose(); } catch { }
         }
 
         /* ============================================================
@@ -458,7 +517,8 @@ namespace Aurora
                 sb.AppendLine("跨淡入淡出：" + (cf > 0 ? cf.ToString("0.#") + " 秒" : "关闭"));
                 sb.AppendLine("输出设备：" + _outputDescription +
                     (Settings.Get("wasapi_exclusive", "0") == "1" ? "（已请求独占）" : ""));
-                sb.AppendLine("输出就绪：" + (_outputFailed ? "失败（播放将无声）" : (_output != null ? "是" : "后台预热中")));
+                sb.AppendLine("输出就绪：" + (_outputFailed ? "失败（可再次播放重试）" : (_output != null ? "是" : "后台预热中")));
+                if (_lastOutputError != null) sb.AppendLine("最近输出错误：" + _lastOutputError);
                 sb.AppendLine("会话 ID：" + _sessionId);
                 sb.AppendLine("引擎版本：Aurora " + AppInfo.Version);
                 return sb.ToString();

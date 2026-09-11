@@ -68,7 +68,7 @@ namespace Aurora
                 {
                     Directory.CreateDirectory(LogDir);
                     string path = Path.Combine(LogDir,
-                        "crash_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".log");
+                        "crash_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + "_" + Guid.NewGuid().ToString("N") + ".log");
                     var sb = new StringBuilder();
                     sb.Append("==== Aurora 崩溃日志 ====\r\n");
                     sb.Append("时间: ").Append(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")).Append("\r\n");

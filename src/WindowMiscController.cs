@@ -5,19 +5,26 @@
  * ============================================================ */
 using System;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using WPath = System.Windows.Shapes.Path;
 
 namespace Aurora
 {
-    class WindowMiscController
+    class WindowMiscController : IDisposable
     {
         readonly Window win;
         readonly MainViewModel vm;
         readonly LibraryImportController importer;
         readonly Action<string> toast;
         WPath icoMax, icoRestore;
+        readonly CancellationTokenSource lifetime = new CancellationTokenSource();
+        readonly CancellationToken token;
+        SingleInstanceServer pipeServer;
+        bool updateStarted;
+        bool disposed;
 
         public WindowMiscController(Window win, MainViewModel vm, LibraryImportController importer, Action<string> toast)
         {
@@ -25,6 +32,8 @@ namespace Aurora
             this.vm = vm;
             this.importer = importer;
             this.toast = toast;
+            token = lifetime.Token;
+            win.Closed += OnClosed;
         }
 
         /// <summary>注入最大化/还原图标控件（FindControls 阶段调用）。</summary>
@@ -46,8 +55,8 @@ namespace Aurora
         /// <summary>单实例：命名管道接收后续打开的文件（管道服务在 SingleInstanceServer）。</summary>
         public void StartPipeServer()
         {
-            SingleInstanceServer.Start(path =>
-                win.Dispatcher.BeginInvoke((Action)(() => OpenExternalFile(path))));
+            if (disposed || pipeServer != null) return;
+            pipeServer = SingleInstanceServer.Start(path => Post(() => OpenExternalFile(path)), token);
         }
 
         /// <summary>启动 5 秒后后台检查更新（24h 节流，P2-5 新体验）：
@@ -55,16 +64,25 @@ namespace Aurora
         /// 不做静默替换。</summary>
         public void StartUpdateCheck()
         {
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                System.Threading.Thread.Sleep(5000);   // 避开启动高峰，不抢扫描/渲染资源
-                UpdateChecker.CheckAsync(info =>
-                    win.Dispatcher.BeginInvoke((Action)(() => ShowUpdateOffer(info))));
-            });
+            if (disposed || updateStarted) return;
+            updateStarted = true;
+            _ = CheckAfterStartupAsync();
         }
 
-        void ShowUpdateOffer(UpdateChecker.UpdateInfo info)
+        async Task CheckAfterStartupAsync()
         {
+            try
+            {
+                await Task.Delay(5000, token).ConfigureAwait(false);
+                await UpdateChecker.CheckAsync(info => Post(() => ShowUpdateOffer(info)), token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { MainViewModel.Dbg("Update startup FAIL: " + ex.Message); }
+        }
+
+        async void ShowUpdateOffer(UpdateChecker.UpdateInfo info)
+        {
+            if (token.IsCancellationRequested) return;
             string title = "发现新版本 v" + info.Version + "（当前 v" + AppInfo.Version + "）";
 
             // 便携版：无安装器承载，保持原体验——提示 + 打开发布页
@@ -81,45 +99,40 @@ namespace Aurora
                 notes, title,
                 System.Windows.Forms.MessageBoxButtons.YesNo,
                 System.Windows.Forms.MessageBoxIcon.Information);
-            if (choice != System.Windows.Forms.DialogResult.Yes || string.IsNullOrEmpty(info.SetupUrl)) return;
+            if (token.IsCancellationRequested || choice != System.Windows.Forms.DialogResult.Yes || string.IsNullOrEmpty(info.SetupUrl)) return;
 
-            // 后台下载，Toast 每 10% 汇报一次进度
-            string target = Path.Combine(Path.GetTempPath(), "AuroraPlayer-Setup-" + info.Version + ".exe");
+            // 文件名不使用网络提供的版本；版本与安装包地址仍在下载边界严格校验。
+            string target = Path.Combine(Path.GetTempPath(), "AuroraPlayer-Setup-" + Guid.NewGuid().ToString("N") + ".exe");
             toast("开始下载 v" + info.Version + "…");
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            try
             {
+                await UpdateChecker.DownloadSetupAsync(info, target,
+                    percent => Post(() => toast("正在下载 v" + info.Version + "（" + percent + "%）…")), token);
+                if (token.IsCancellationRequested) return;
+                var install = System.Windows.Forms.MessageBox.Show(
+                    "v" + info.Version + " 下载完成，立即运行安装器？",
+                    "Aurora 更新", System.Windows.Forms.MessageBoxButtons.YesNo,
+                    System.Windows.Forms.MessageBoxIcon.Question);
+                if (token.IsCancellationRequested || install != System.Windows.Forms.DialogResult.Yes) return;
                 try
                 {
-                    bool ok = UpdateChecker.DownloadSetup(info.SetupUrl, target, percent =>
-                        win.Dispatcher.BeginInvoke((Action)(() => toast("正在下载 v" + info.Version + "（" + percent + "%）…"))));
-                    win.Dispatcher.BeginInvoke((Action)(() =>
-                    {
-                        if (!ok) { toast("下载失败，请到发布页手动下载"); OpenReleasesPage(); return; }
-                        var install = System.Windows.Forms.MessageBox.Show(
-                            "v" + info.Version + " 下载完成，立即运行安装器？",
-                            "Aurora 更新", System.Windows.Forms.MessageBoxButtons.YesNo,
-                            System.Windows.Forms.MessageBoxIcon.Question);
-                        if (install == System.Windows.Forms.DialogResult.Yes)
-                        {
-                            try
-                            {
-                                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
-                                    target) { UseShellExecute = true });
-                            }
-                            catch (Exception ex) { MainViewModel.Dbg("run setup FAIL: " + ex.Message); }
-                        }
-                    }));
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(target) { UseShellExecute = true });
                 }
-                catch (Exception ex)
-                {
-                    MainViewModel.Dbg("update download FAIL: " + ex.Message);
-                    win.Dispatcher.BeginInvoke((Action)(() => { toast("下载失败，请到发布页手动下载"); OpenReleasesPage(); }));
-                }
-            });
+                catch (Exception ex) { MainViewModel.Dbg("run setup FAIL: " + ex.Message); }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                MainViewModel.Dbg("update download FAIL: " + ex.Message);
+                if (token.IsCancellationRequested) return;
+                toast("下载失败，请到发布页手动下载");
+                OpenReleasesPage();
+            }
         }
 
         void OpenReleasesPage()
         {
+            if (token.IsCancellationRequested) return;
             try
             {
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
@@ -131,6 +144,7 @@ namespace Aurora
         /// <summary>单实例唤醒：定位到被打开的文件（同目录已在列表则直接切歌，否则载入目录）。</summary>
         public void OpenExternalFile(string path)
         {
+            if (token.IsCancellationRequested) return;
             if (win.WindowState == WindowState.Minimized) win.WindowState = WindowState.Normal;
             win.Activate();
             string dir = LibraryImportController.SafeDir(path);
@@ -142,6 +156,31 @@ namespace Aurora
                 if (t != null) { vm.PlayTrack(t, true); return; }
             }
             importer.LoadDirectory(dir, path, false);
+        }
+
+        void Post(Action action)
+        {
+            if (token.IsCancellationRequested || win.Dispatcher.HasShutdownStarted) return;
+            try
+            {
+                win.Dispatcher.BeginInvoke((Action)(() =>
+                {
+                    if (!token.IsCancellationRequested) action();
+                }));
+            }
+            catch (InvalidOperationException) { }
+        }
+
+        void OnClosed(object sender, EventArgs e) => Dispose();
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            win.Closed -= OnClosed;
+            lifetime.Cancel();
+            pipeServer?.Dispose();
+            lifetime.Dispose();
         }
     }
 }

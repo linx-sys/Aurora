@@ -28,6 +28,16 @@
       <GradientStop Color="#F472B6" Offset="1"/>
     </LinearGradientBrush>
 
+    <Style x:Key="KeyboardFocus" TargetType="Control">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Control">
+            <Rectangle Margin="2" Stroke="{DynamicResource Accent}" StrokeThickness="2" StrokeDashArray="2,1" RadiusX="4" RadiusY="4"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="IconBtn" TargetType="Button">
       <Setter Property="Width" Value="36"/>
       <Setter Property="Height" Value="36"/>

@@ -15,7 +15,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="src\AppInfo.cs" />
     <Compile Include="src\Uninstaller.cs" />
+    <Compile Include="src\InstallManifest.cs" />
+    <Compile Include="src\InstallTransaction.cs" />
+    <Compile Include="src\OwnedInstallFile.cs" />
   </ItemGroup>
 
 </Project>

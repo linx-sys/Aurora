@@ -9,6 +9,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Xunit;
 
 namespace Aurora.Tests
@@ -21,16 +23,18 @@ namespace Aurora.Tests
         public TimeSpan Position { get; set; }
         public TimeSpan Duration { get; set; } = TimeSpan.FromSeconds(180);
         public long SessionId { get; set; }
-        public string CurrentPath { get; set; }
+        public string? CurrentPath { get; set; }
         public bool LoadResult { get; set; } = true;
+        public bool PlayResult { get; set; } = true;
 
         public List<string> LoadedPaths = new List<string>();
         public List<string> PreloadedPaths = new List<string>();
         public List<float> GainHistory = new List<float>();
         public int PlayCount, PauseCount, StopCount;
 
-        public event EventHandler<PlaybackStateChangedEventArgs> StateChanged;
-        public event EventHandler<PlaybackEndedEventArgs> PlaybackEnded;
+        // 此替身只驱动结束事件，状态由协调器查询；状态事件不保留订阅。
+        public event EventHandler<PlaybackStateChangedEventArgs>? StateChanged { add { } remove { } }
+        public event EventHandler<PlaybackEndedEventArgs>? PlaybackEnded;
 
         public bool Load(string path)
         {
@@ -50,7 +54,7 @@ namespace Aurora.Tests
             return true;
         }
 
-        public void Play() { PlayCount++; State = PlaybackState.Playing; }
+        public void Play() { PlayCount++; if (PlayResult) State = PlaybackState.Playing; }
         public void Pause() { PauseCount++; State = PlaybackState.Paused; }
         public void Stop() { StopCount++; State = PlaybackState.Stopped; }
         public void Seek(TimeSpan position) { Position = position; }
@@ -65,21 +69,27 @@ namespace Aurora.Tests
         }
     }
 
-    public class PlaybackCoordinatorTests : IDisposable
+    public class PlaybackCoordinatorTests : IAsyncLifetime
     {
         readonly string dbPath = Path.Combine(Path.GetTempPath(), "aurora_coord_" + Guid.NewGuid().ToString("N") + ".db");
         readonly FakePlaybackService fake = new FakePlaybackService();
         readonly PlaybackCoordinator coordinator;
+        readonly LibraryDatabase store;
 
         public PlaybackCoordinatorTests()
         {
-            var store = new LibraryDatabase(dbPath);
+            store = new LibraryDatabase(dbPath);
             // UI 调度内联执行：引擎后台回调在测试线程同步跑完，可断言
             coordinator = new PlaybackCoordinator(fake, store, new PlaylistManager(), a => a());
         }
 
-        public void Dispose()
+        public Task InitializeAsync() => Task.CompletedTask;
+
+        public async Task DisposeAsync()
         {
+            coordinator.Dispose();
+            await coordinator.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+            store.Dispose();
             try { File.Delete(dbPath); } catch { }
             try { File.Delete(dbPath + "-wal"); } catch { }
             try { File.Delete(dbPath + "-shm"); } catch { }
@@ -103,7 +113,7 @@ namespace Aurora.Tests
         [Fact]
         public void PlayTrack_Success_SetsCurrent_AndRaisesEvent()
         {
-            CurrentTrackChangedEventArgs args = null;
+            CurrentTrackChangedEventArgs? args = null;
             coordinator.CurrentTrackChanged += (s, e) => args = e;
 
             var t = T("a");
@@ -121,7 +131,7 @@ namespace Aurora.Tests
         public void PlayTrack_LoadFail_ClearsCurrent_RaisesLoadFailed()
         {
             fake.LoadResult = false;
-            CurrentTrackChangedEventArgs args = null;
+            CurrentTrackChangedEventArgs? args = null;
             coordinator.CurrentTrackChanged += (s, e) => args = e;
 
             coordinator.PlayTrack(T("bad"));
@@ -253,12 +263,83 @@ namespace Aurora.Tests
             Assert.Equal(PlaybackState.Playing, fake.State);
         }
 
+        [Fact]
+        public void PlayTrack_OutputFailure_DoesNotReportPlaying()
+        {
+            fake.PlayResult = false;
+            var states = new List<bool>();
+            var errors = new List<string>();
+            coordinator.PlayStateChanged += (_, state) => states.Add(state);
+            coordinator.PlaybackError += (_, error) => errors.Add(error);
+            coordinator.PlayTrack(T("no-output"));
+            Assert.Equal(PlaybackState.Stopped, fake.State);
+            Assert.NotEmpty(states);
+            Assert.DoesNotContain(true, states);
+            Assert.Single(errors);
+            coordinator.TogglePlay();
+            Assert.False(states.Last());
+        }
+
+        [Fact]
+        public void PlayTrack_FailureAfterPlaying_ClearsCurrentAndPlayingState()
+        {
+            coordinator.PlayTrack(T("valid"));
+            Assert.Equal(PlaybackState.Playing, fake.State);
+            bool playing = true;
+            coordinator.PlayStateChanged += (_, state) => playing = state;
+            fake.LoadResult = false;
+            coordinator.PlayTrack(T("invalid"));
+            Assert.Null(coordinator.CurrentTrack);
+            Assert.False(playing);
+            Assert.Equal(PlaybackState.Stopped, fake.State);
+        }
+
+        [Fact]
+        public async Task ReplayGain_DisposeWaitsForActiveScanAndCancelsQueuedScan()
+        {
+            var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var release = new ManualResetEventSlim();
+            int calls = 0, callbacks = 0;
+            using var subject = new PlaybackCoordinator(fake, store, new PlaylistManager(),
+                _ => Interlocked.Increment(ref callbacks), (path, token) =>
+                {
+                    Interlocked.Increment(ref calls);
+                    entered.TrySetResult(true);
+                    if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException();
+                    token.ThrowIfCancellationRequested();
+                    return null;
+                });
+            try
+            {
+                subject.ScheduleLoudnessScan("active.mp3");
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                subject.ScheduleLoudnessScan("queued.mp3");
+                subject.ScheduleLoudnessScan("active.mp3");
+                subject.Dispose();
+                subject.Dispose();
+                Task completion = subject.Completion;
+                Assert.False(completion.IsCompleted);
+                release.Set();
+                await completion.WaitAsync(TimeSpan.FromSeconds(5));
+                subject.ScheduleLoudnessScan("after-close.mp3");
+                Assert.Equal(1, calls);
+                Assert.Equal(0, callbacks);
+                Assert.True(subject.Completion.IsCompletedSuccessfully);
+            }
+            finally
+            {
+                release.Set();
+                subject.Dispose();
+                await subject.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
+
         /* ---------- ReplayGain 缓存应用 ---------- */
 
         [Fact]
         public void ReplayGain_CachedGain_AppliedToEngine()
         {
-            var store = new LibraryDatabase(dbPath);   // 与协调器同一库文件（LibraryDatabase 内部加锁，各实例可共存）
+            using var store = new LibraryDatabase(dbPath);   // 与协调器同一库文件（LibraryDatabase 内部加锁，各实例可共存）
             store.Upsert(new TrackRow
             {
                 Path = @"Z:\M\rg.mp3", FileName = "rg.mp3",

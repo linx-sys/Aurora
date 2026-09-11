@@ -28,6 +28,8 @@ namespace Aurora
         IPlaybackService Player;
         PlayerEngine Engine;                     // 具体引擎引用（诊断文本等引擎级能力）
         MainViewModel ViewModel;
+        LibraryDatabase LibraryStore;
+        bool closing, closeReady;
 
         // ===== 装配出的控制器（View 行为全部下沉） =====
         LyricsViewController Lyrics;             // 歌词渲染/高亮/滚动/配色
@@ -59,6 +61,8 @@ namespace Aurora
                 WindowChromeController.EnableRoundedCorners(Win);
                 // 挂 Win32 消息钩子：最大化时限制为工作区，不盖任务栏
                 WindowChromeController.Attach(Win);
+                try { SmTc?.Attach(); }
+                catch (Exception ex) { Logger.Dbg("SMTC attach: " + ex.Message); }
             };
 
             var chrome = new System.Windows.Shell.WindowChrome();
@@ -85,8 +89,9 @@ namespace Aurora
                 Theme, Importer, PlaylistView, NetMatchView, Misc, StateView, Toast, Hotkey);
 
             // 播放模式/音量从设置恢复：写入 ViewModel（唯一数据源），图标经 StateView 联动刷新
-            ViewModel.Mode = (PlayMode)UiUtil.ParseInt(Settings.Get("mode", "0"));
-            StateView.ApplyVolume(UiUtil.Clamp(UiUtil.ParseDouble(Settings.Get("volume", "0.8")), 0, 1));
+            ViewModel.Mode = Settings.GetEnum("mode", PlayMode.ListRepeat);
+            StateView.ApplyVolume(Settings.GetDouble("volume", 0.8, 0, 1));
+            ViewModel.PlaybackError += (s, message) => { if (!closing) Toast(message); };
             StateView.InitInitialState();
 
             // 任务栏进度条（Windows 播放器惯例：播放中绿色进度/暂停黄色）
@@ -127,7 +132,8 @@ namespace Aurora
 
         void FindControls()
         {
-            ILibraryStore library = new LibraryDatabase(LibraryDatabase.DefaultPath);
+            LibraryStore = new LibraryDatabase(LibraryDatabase.DefaultPath);
+            ILibraryStore library = LibraryStore;
             Engine = new PlayerEngine();
             Player = Engine;
             ViewModel = new MainViewModel(Player, library);
@@ -182,7 +188,7 @@ namespace Aurora
             try
             {
                 SmTc = new SmTcController(Win, ViewModel);
-                SmTc.Attach();
+                // Attach 延迟到 SourceInitialized，此时 HWND 才有效。
             }
             catch (Exception smtcEx) { MainViewModel.Dbg("SMTC init FAIL: " + smtcEx.Message); SmTc = null; }
 
@@ -209,17 +215,39 @@ namespace Aurora
 
         void WireClosing()
         {
-            Win.Closing += (s, e) =>
+            Win.Closing += async (s, e) =>
             {
-                try { Tick?.Stop(); } catch { }
-                try { ToastCtrl?.Stop(); } catch { }
-                try { StateView?.StopTimers(); } catch { }
-                try { Player?.Dispose(); } catch { }
-                Settings.Set("volume", ViewModel.SavedVolume.ToString("0.00", CultureInfo.InvariantCulture));
-                Settings.Set("mode", ((int)ViewModel.Mode).ToString());
-                // 记住最后播放曲目（退出时一次写盘）+ 最近播放 JumpList（P2-5）
-                Settings.Set("lastTrack", ViewModel.CurrentTrack != null ? ViewModel.CurrentTrack.FilePath : "");
-                App.UpdateJumpList(ViewModel.CurrentTrack != null ? ViewModel.CurrentTrack.FilePath : null);
+                if (closeReady) return;
+                e.Cancel = true;
+                if (closing) return;
+                closing = true;
+                Win.IsEnabled = false;
+                Tick?.Stop();
+                ToastCtrl?.Stop();
+                StateView?.StopTimers();
+                Importer?.Dispose();
+                Misc?.Dispose();
+                NetMatchView?.Dispose();
+                SmTc?.Dispose();
+                ViewModel.Dispose();
+                try
+                {
+                    Settings.Set("volume", ViewModel.SavedVolume.ToString("0.00", CultureInfo.InvariantCulture));
+                    Settings.Set("mode", ((int)ViewModel.Mode).ToString(CultureInfo.InvariantCulture));
+                    Settings.Set("lastTrack", ViewModel.CurrentTrack?.FilePath ?? "");
+                    App.UpdateJumpList(ViewModel.CurrentTrack?.FilePath);
+                    Player?.Dispose();
+                    // 不同步阻塞 Dispatcher；导入与响度任务退出后才能关闭共享数据库。
+                    await System.Threading.Tasks.Task.WhenAll(Importer.Completion, ViewModel.Completion);
+                }
+                catch (Exception ex) { Logger.Dbg("Shutdown: " + ex); }
+                finally
+                {
+                    LibraryStore?.Dispose();
+                    closeReady = true;
+                    // WhenAll 可能同步完成，必须在本次 Closing 返回后再关闭，避免重入。
+                    _ = Win.Dispatcher.BeginInvoke(new Action(() => Win.Close()));
+                }
             };
         }
     }

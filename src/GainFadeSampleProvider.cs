@@ -60,12 +60,12 @@ namespace Aurora
             lock (_lock)
             {
                 bool needsEnvelope = _fadeInSec > 0 || _fadeOutStartAt != double.MaxValue || _baseGain != 1f;
-                if (!needsEnvelope) return read;
-
                 int channels = _source.WaveFormat.Channels;
                 int frames = read / channels;
                 double sr = _source.WaveFormat.SampleRate;
                 double pos = _readSeconds;
+                _readSeconds += frames / sr;
+                if (!needsEnvelope) return read;
 
                 for (int f = 0; f < frames; f++)
                 {
@@ -90,7 +90,6 @@ namespace Aurora
                             buffer[baseIdx + c] *= (float)gain;
                     }
                 }
-                _readSeconds += frames / sr;
             }
             return read;
         }

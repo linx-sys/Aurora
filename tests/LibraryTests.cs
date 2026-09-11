@@ -7,6 +7,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Linq;
+using System.Threading;
 using Xunit;
 
 namespace Aurora.Tests
@@ -15,7 +17,7 @@ namespace Aurora.Tests
     {
         readonly string dir = Path.Combine(Path.GetTempPath(), "aurora_tests_" + Guid.NewGuid().ToString("N"));
 
-        string Write(string name, byte[] bytes)
+        string Write(string name, byte[]? bytes)
         {
             Directory.CreateDirectory(dir);
             string p = Path.Combine(dir, name);
@@ -89,6 +91,34 @@ namespace Aurora.Tests
             Assert.Single(tracks);
             Assert.NotNull(tracks[0].LrcText);
             Assert.Contains("[00:01]line", tracks[0].LrcText);
+        }
+
+        [Fact]
+        public void BuildTracks_LyricsStayInTheirOwnDirectory()
+        {
+            string a = Path.Combine(dir, "a"), b = Path.Combine(dir, "b");
+            Directory.CreateDirectory(a);
+            Directory.CreateDirectory(b);
+            string first = Path.Combine(a, "song.mp3"), second = Path.Combine(b, "song.mp3");
+            File.WriteAllBytes(first, new byte[] { 1, 2, 3 });
+            File.WriteAllBytes(second, new byte[] { 1, 2, 3 });
+            string lyric = Path.Combine(a, "song.lrc");
+            File.WriteAllText(lyric, "[00:01]only-a");
+            var tracks = Library.BuildTracks(new[] { first, second, lyric });
+            Assert.Contains("only-a", tracks.Single(t => t.FilePath == first).LrcText);
+            Assert.Null(tracks.Single(t => t.FilePath == second).LrcText);
+        }
+
+        [Fact]
+        public void ScanningAndMaterialization_RespectCancellation()
+        {
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            Assert.Throws<OperationCanceledException>(() => Library.EnumerateFiles(dir, new List<string>(), 0, cancellation.Token));
+            Assert.Throws<OperationCanceledException>(() => Library.BuildTracksIncremental(Array.Empty<string>(), null, null, cancellation.Token));
+            Assert.Throws<OperationCanceledException>(() => Library.BuildTracksFromRows(Array.Empty<TrackRow>(), false, cancellation.Token));
+            Assert.Throws<OperationCanceledException>(() => Library.FromMetadata("song.mp3", "Song", null, null,
+                TimeSpan.Zero, null, null, readFsExtras: false, cancellationToken: cancellation.Token));
         }
 
         [Fact]
@@ -193,7 +223,7 @@ namespace Aurora.Tests
         public void ArtistChange_RaisesSubTextNotification()
         {
             var t = T();
-            string notified = null;
+            string? notified = null;
             t.PropertyChanged += (s, e) => { if (e.PropertyName == "SubText") notified = e.PropertyName; };
             t.Artist = "新歌手";
             Assert.Equal("SubText", notified);

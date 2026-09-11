@@ -165,7 +165,7 @@ namespace Aurora.Tests
         {
             var c = new PlaybackController();
             Assert.Null(c.GetNextForAuto(new List<Track>(), null));
-            Assert.Null(c.GetNextForAuto(null, null));
+            Assert.Null(c.GetNextForAuto(null!, null));
         }
     }
 }

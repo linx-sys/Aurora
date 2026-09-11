@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Microsoft.Data.Sqlite;
 using Xunit;
 
 namespace Aurora.Tests
@@ -15,14 +16,14 @@ namespace Aurora.Tests
     public class LibraryDatabaseTests : IDisposable
     {
         readonly string dbPath = Path.Combine(Path.GetTempPath(), "aurora_tests_" + Guid.NewGuid().ToString("N") + ".db");
-        LibraryDatabase db;
+        LibraryDatabase? db;
 
         LibraryDatabase Db
         {
             get { return db ?? (db = new LibraryDatabase(dbPath)); }
         }
 
-        static TrackRow Row(string path, string title = "T", long bytes = 100, long mtime = 12345, byte[] cover = null)
+        static TrackRow Row(string path, string title = "T", long bytes = 100, long mtime = 12345, byte[]? cover = null)
         {
             return new TrackRow
             {
@@ -34,6 +35,7 @@ namespace Aurora.Tests
 
         public void Dispose()
         {
+            db?.Dispose();
             try { File.Delete(dbPath); } catch { }
             try { File.Delete(dbPath + "-wal"); } catch { }
             try { File.Delete(dbPath + "-shm"); } catch { }
@@ -64,6 +66,7 @@ namespace Aurora.Tests
             Db.Upsert(r);
 
             var got = Db.TryGet("D:\\M\\b.mp3");
+            Assert.NotNull(got);
             Assert.Null(got.Title);
             Assert.Null(got.Artist);
             Assert.Null(got.Album);
@@ -77,6 +80,7 @@ namespace Aurora.Tests
             Db.Upsert(Row("D:\\M\\c.mp3", "new", bytes: 2, mtime: 2));
 
             var got = Db.TryGet("D:\\M\\c.mp3");
+            Assert.NotNull(got);
             Assert.Equal("new", got.Title);
             Assert.Equal(2, got.Bytes);
             Assert.Equal(2, got.LastModified);
@@ -97,8 +101,9 @@ namespace Aurora.Tests
         [Fact]
         public void Upsert_NullOrPathlessRow_Ignored()
         {
-            Db.Upsert(null);
-            Db.Upsert(new TrackRow { Path = null });
+            // 故意突破非空契约，验证损坏输入的运行时防御。
+            Db.Upsert(null!);
+            Db.Upsert(new TrackRow { Path = null! });
             Assert.Null(Db.TryGet("anything"));
         }
 
@@ -106,7 +111,7 @@ namespace Aurora.Tests
         public void TryGet_MissingOrInvalid_ReturnsNull()
         {
             Assert.Null(Db.TryGet("missing.mp3"));
-            Assert.Null(Db.TryGet(null));
+            Assert.Null(Db.TryGet(null!));
             Assert.Null(Db.TryGet(""));
         }
 
@@ -138,6 +143,79 @@ namespace Aurora.Tests
             Assert.NotNull(backup);
         }
 
+        [Theory]
+        [InlineData("d:/müsic")]
+        [InlineData("D:\\MÜSIC\\")]
+        [InlineData("d:/müsic/./")]
+        public void Prefix_UsesDirectoryBoundaryAndUnicodeCase(string directory)
+        {
+            Db.Upsert(Row("D:\\Müsic\\song.mp3"));
+            Db.Upsert(Row("D:\\MüsicBackup\\other.mp3"));
+            Db.Upsert(Row("D:\\Müsic.mp3"));
+            Assert.Single(Db.GetByPrefix(directory));
+            Assert.Equal("song.mp3", Db.GetByPrefix(directory)[0].FileName);
+        }
+
+        [Fact]
+        public void Crud_UsesSameNormalizedPathIdentity()
+        {
+            Db.Upsert(Row("D:\\Müsic\\song.mp3", "old"));
+            Db.Upsert(Row("d:/MÜSIC/./SONG.MP3", "new"));
+            Assert.Single(Db.GetByPrefix("d:/müsic/"));
+            var updated = Db.TryGet("d:/müsic/song.mp3");
+            Assert.NotNull(updated);
+            Assert.Equal("new", updated.Title);
+            Assert.Equal(0, Db.DeleteMissingUnder("D:/MÜSIC", new HashSet<string> { "d:/müsic/SONG.mp3" }));
+            Db.Delete(new[] { "d:/müsic/SONG.mp3" });
+            Assert.Null(Db.TryGet("D:\\Müsic\\song.mp3"));
+        }
+
+        [Fact]
+        public void Migration_PreservesLegacyCaseVariantsAndAddsVersion()
+        {
+            using (var legacy = new SqliteConnection("Data Source=" + dbPath + ";Pooling=False"))
+            {
+                legacy.Open();
+                using var command = legacy.CreateCommand();
+                command.CommandText = @"CREATE TABLE tracks(path TEXT PRIMARY KEY,file_name TEXT NOT NULL,
+                    title TEXT,artist TEXT,album TEXT,duration REAL,bytes INTEGER,last_modified INTEGER,cover BLOB);
+                    INSERT INTO tracks VALUES('D:\Müsic\song.mp3','song.mp3','kept',NULL,NULL,1,2,3,NULL);
+                    INSERT INTO tracks VALUES('d:\müsic\SONG.mp3','SONG.mp3','also-kept',NULL,NULL,1,2,4,NULL);";
+                command.ExecuteNonQuery();
+            }
+            var migrated = Db.TryGet("d:/MÜSIC/song.mp3");
+            Assert.NotNull(migrated);
+            Assert.Equal("also-kept", migrated.Title);
+            Assert.Single(Db.GetByPrefix("d:/MÜSIC"));
+            using var inspect = new SqliteConnection("Data Source=" + dbPath + ";Pooling=False");
+            inspect.Open();
+            using var query = inspect.CreateCommand();
+            query.CommandText = "SELECT COUNT(*) FROM tracks";
+            Assert.Equal(2L, Convert.ToInt64(query.ExecuteScalar()));
+            query.CommandText = "PRAGMA user_version";
+            Assert.Equal(2L, Convert.ToInt64(query.ExecuteScalar()));
+        }
+
+        [Fact]
+        public void EnsureOpen_FailureCanBeRetried()
+        {
+            Directory.CreateDirectory(dbPath);
+            try { Assert.ThrowsAny<Exception>(() => Db.TryGet("fake.mp3")); }
+            finally { Directory.Delete(dbPath); }
+            Db.Upsert(Row("fake.mp3"));
+            Assert.NotNull(Db.TryGet("FAKE.MP3"));
+        }
+
+        [Fact]
+        public void Dispose_ClosesConnectionAndRejectsFurtherOperations()
+        {
+            Db.Upsert(Row("fake.mp3"));
+            Db.Dispose();
+            Db.Dispose();
+            Assert.Throws<ObjectDisposedException>(() => Db.TryGet("fake.mp3"));
+            using var exclusive = new FileStream(dbPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+
         [Fact]
         public void FingerprintMatches_RequiresBothFieldsEqual()
         {
@@ -153,7 +231,7 @@ namespace Aurora.Tests
         {
             Db.Upsert(Row("D:\\M\\persist.mp3", "kept"));
             // 同一路径重新打开（模拟进程重启）
-            var db2 = new LibraryDatabase(dbPath);
+            using var db2 = new LibraryDatabase(dbPath);
             var got = db2.TryGet("D:\\M\\persist.mp3");
             Assert.NotNull(got);
             Assert.Equal("kept", got.Title);
@@ -165,7 +243,8 @@ namespace Aurora.Tests
         readonly string dbPath = Path.Combine(Path.GetTempPath(), "aurora_tests_" + Guid.NewGuid().ToString("N") + ".db");
         readonly string dir = Path.Combine(Path.GetTempPath(), "aurora_tests_" + Guid.NewGuid().ToString("N"));
 
-        LibraryDatabase Db { get { return new LibraryDatabase(dbPath); } }
+        LibraryDatabase? db;
+        LibraryDatabase Db { get { return db ?? (db = new LibraryDatabase(dbPath)); } }
 
         string WriteAudio(string name)
         {
@@ -177,6 +256,7 @@ namespace Aurora.Tests
 
         public void Dispose()
         {
+            db?.Dispose();
             try { Directory.Delete(dir, true); } catch { }
             try { File.Delete(dbPath); } catch { }
             try { File.Delete(dbPath + "-wal"); } catch { }
@@ -210,6 +290,7 @@ namespace Aurora.Tests
 
             // 直接篡改缓存行：若第二次扫描复用缓存，构建出的 Track 会带上篡改标记
             var row = db.TryGet(p);
+            Assert.NotNull(row);
             row.Title = "CACHED_MARKER";
             db.Upsert(row);
 
@@ -225,6 +306,7 @@ namespace Aurora.Tests
             Library.BuildTracksIncremental(new[] { p }, db, dir);
 
             var row = db.TryGet(p);
+            Assert.NotNull(row);
             row.Title = "CACHED_MARKER";
             db.Upsert(row);
 
@@ -234,6 +316,7 @@ namespace Aurora.Tests
             Assert.Equal("晴天", tracks2[0].Title);   // 回到文件名推断结果（缓存未复用）
 
             var row2 = db.TryGet(p);
+            Assert.NotNull(row2);
             Assert.Equal("晴天", row2.Title);          // 缓存同步更新
         }
 
@@ -262,12 +345,26 @@ namespace Aurora.Tests
             Library.BuildTracksIncremental(new[] { p1 }, db, dir);
 
             var row = db.TryGet(p1);
+            Assert.NotNull(row);
             row.Title = "KEEP_ME";
             db.Upsert(row);
 
             string p2 = WriteAudio("b.mp3");
             Library.BuildTracksIncremental(new[] { p2 }, db, null);
-            Assert.Equal("KEEP_ME", db.TryGet(p1).Title);
+            var retained = db.TryGet(p1);
+            Assert.NotNull(retained);
+            Assert.Equal("KEEP_ME", retained.Title);
+        }
+
+        [Fact]
+        public void IncompleteEnumeration_DoesNotDeleteCachedFiles()
+        {
+            string path = WriteAudio("keep.mp3");
+            Library.BuildTracksIncremental(new[] { path }, Db, dir);
+            bool complete = Library.EnumerateFiles(Path.Combine(dir, "missing"), new List<string>(), 0);
+            Assert.False(complete);
+            Library.BuildTracksIncremental(Array.Empty<string>(), Db, dir, enumerationComplete: complete);
+            Assert.NotNull(Db.TryGet(path));
         }
 
         [Fact]

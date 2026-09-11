@@ -21,7 +21,7 @@ namespace Aurora.Tests
         {
             get { return db ?? (db = new LibraryDatabase(dbPath)); }
         }
-        LibraryDatabase db;
+        LibraryDatabase? db;
 
         public LibraryDbFirstTests()
         {
@@ -30,7 +30,9 @@ namespace Aurora.Tests
 
         public void Dispose()
         {
+            db?.Dispose();
             try { Directory.Delete(root, true); } catch { }
+            try { Directory.Delete(root + "Backup", true); } catch { }
             try { File.Delete(dbPath); } catch { }
             try { File.Delete(dbPath + "-wal"); } catch { }
             try { File.Delete(dbPath + "-shm"); } catch { }
@@ -40,7 +42,9 @@ namespace Aurora.Tests
         string WriteFake(string relName)
         {
             string path = Path.Combine(root, relName);
-            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            string? parent = Path.GetDirectoryName(path);
+            Assert.NotNull(parent);
+            Directory.CreateDirectory(parent);
             File.WriteAllText(path, "fake-audio-" + relName);
             File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddMinutes(-5));
             return path;
@@ -162,7 +166,7 @@ namespace Aurora.Tests
             string a = WriteFake("a.mp3");
             Library.BuildTracksIncremental(new[] { a }, Db, null);   // 无清理地 upsert
             string backupFile = Path.Combine(root + "Backup", "keep.mp3");
-            Directory.CreateDirectory(Path.GetDirectoryName(backupFile));
+            Directory.CreateDirectory(root + "Backup");
             File.WriteAllText(backupFile, "x");
             Db.Upsert(Row(backupFile, "KEEP"));
 

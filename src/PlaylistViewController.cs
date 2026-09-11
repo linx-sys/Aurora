@@ -52,22 +52,33 @@ namespace Aurora
             this.player = player;
             this.toast = toast;
 
-            // 用代码设置 ItemsPanel 为 AnimatedStackPanel（松散 XAML 无法解析自定义类型）
-            var apf = new FrameworkElementFactory(typeof(AnimatedStackPanel));
-            list.ItemsPanel = new ItemsPanelTemplate(apf);
+            // 回收虚拟化只创建可见行；不能用普通 Panel 换掉默认面板。
+            list.ItemsPanel = new ItemsPanelTemplate(new FrameworkElementFactory(typeof(VirtualizingStackPanel)));
+            VirtualizingPanel.SetIsVirtualizing(list, true);
+            VirtualizingPanel.SetVirtualizationMode(list, VirtualizationMode.Recycling);
+            ScrollViewer.SetCanContentScroll(list, true);
 
             HookEvents();
+            UpdateSortHint();
+            vm.PropertyChanged += (s, e) =>
+            {
+                if (e.PropertyName == nameof(vm.SortMode)) UpdateSortHint();
+            };
             listCount.Text = "共 0 首歌曲";
+        }
+
+        void UpdateSortHint()
+        {
+            btnSort.ToolTip = "排序方式：" + PlaylistManager.GetSortModeName(vm.SortMode);
         }
 
         void HookEvents()
         {
             btnSort.Click += (s, e) =>
             {
-                vm.SortMode = (vm.SortMode + 1) % 5;   // setter 内自动刷新视图
-                string[] names = { "文件名", "标题", "歌手", "时长（短→长）", "时长（长→短）", "自定义顺序" };
-                btnSort.ToolTip = "排序方式：" + names[vm.SortMode];
-                toast("排序：" + names[vm.SortMode]);
+                vm.SortMode = (vm.SortMode + 1) % PlaylistManager.SortModeCount;
+                UpdateSortHint();
+                toast("排序：" + PlaylistManager.GetSortModeName(vm.SortMode));
             };
 
             // 列表计数跟随 View 集合变化（排序/搜索/导入/删除/拖动全覆盖）
@@ -150,11 +161,7 @@ namespace Aurora
                     vm.RefreshView();
                     toast("已移到第 " + (targetIdx + 1) + " 位");
                 }
-                // DoDragDrop 模态循环会干扰 MediaPlayer 时钟，正在播放时重新激活
-                if (vm.IsPlaying)
-                {
-                    try { player.Play(); } catch { }
-                }
+                // 当前音频输出由引擎持有；拖放不直接发播放命令，避免绕过协调器。
                 e.Handled = true;
             };
             list.KeyDown += (s, e) =>
@@ -254,11 +261,11 @@ namespace Aurora
             DependencyObject dep = hit as DependencyObject;
             while (dep != null && !(dep is ListBoxItem))
                 dep = VisualTreeHelper.GetParent(dep);
-            if (dep == null) return vm.Tracks.Count;  // 落在空白处 → 追加到末尾
+            if (dep == null) return vm.View.Count;  // 返回视图坐标，调用方统一转换
             ListBoxItem item = dep as ListBoxItem;
             Track t = item.DataContext as Track;
-            int idx = vm.Tracks.IndexOf(t);
-            if (idx < 0) return vm.Tracks.Count;
+            int idx = vm.View.IndexOf(t);
+            if (idx < 0) return vm.View.Count;
             // 落在该项下半部分 → 插到该项之后
             Point itemTop = item.TranslatePoint(new Point(0, 0), list);
             if (pt.Y > itemTop.Y + item.RenderSize.Height / 2) idx++;

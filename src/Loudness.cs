@@ -9,6 +9,8 @@
  * ============================================================ */
 using System;
 using System.IO;
+using System.Collections.Generic;
+using System.Threading;
 using NAudio.Wave;
 
 namespace Aurora
@@ -90,121 +92,132 @@ namespace Aurora
 
         /* ---------------- 分析 ---------------- */
 
-        /// <summary>
-        /// 分析交错 PCM 样本的门限响度（channels≤2 时权重 1.0）。
-        /// 返回综合响度 LUFS；无有效块返回 -70。
-        /// </summary>
+        /// <summary>分析单声道或立体声交错 PCM；与文件分析使用相同的连续滤波路径。</summary>
         public static Result AnalyzeSamples(float[] interleaved, int channels, int sampleRate)
         {
             if (channels <= 0 || sampleRate <= 0 || interleaved == null || interleaved.Length == 0)
                 return new Result { IntegratedLufs = -70, GainDb = MaxGainDb, Peak = 0 };
-
-            int ch = Math.Min(channels, 2);
-            var shelf = new Biquad[ch];
-            var hp = new Biquad[ch];
-            for (int c = 0; c < ch; c++) { shelf[c] = DesignShelf(sampleRate); hp[c] = DesignHighPass(sampleRate); }
-
-            // 块参数：400ms 块，100ms 步
-            int blockSamples = (int)(0.4 * sampleRate) * ch;
-            int hopSamples = (int)(0.1 * sampleRate) * ch;
-            if (blockSamples == 0 || interleaved.Length < blockSamples)
-            {
-                // 太短：退化为单块（不足 400ms 按整段算）
-                blockSamples = interleaved.Length;
-                hopSamples = interleaved.Length;
-            }
-
-            // 预滤波整段 + 累计峰值（K 滤波前后峰值差异：RG 用未加权峰值，这里单独扫原始样本）
-            double peak = 0;
-            for (int i = 0; i < interleaved.Length; i++)
-            {
-                double a = Math.Abs(interleaved[i]);
-                if (a > peak) peak = a;
-            }
-
-            var blockLoudness = new System.Collections.Generic.List<double>();
-            int offset = 0;
-            while (offset + blockSamples <= interleaved.Length)
-            {
-                // 每块重置滤波器状态（BS.1770 分块独立测量）
-                for (int c = 0; c < ch; c++) { shelf[c] = DesignShelf(sampleRate); hp[c] = DesignHighPass(sampleRate); }
-
-                double sumSq = 0;
-                int frames = blockSamples / ch;
-                for (int f = 0; f < frames; f++)
-                {
-                    for (int c = 0; c < ch; c++)
-                    {
-                        double x = interleaved[offset + f * ch + c];
-                        double y = hp[c].Process(shelf[c].Process(x));
-                        sumSq += y * y;   // 立体声权重各 1.0
-                    }
-                }
-                double meanSquare = sumSq / frames;   // 每声道均方（权重已含 1.0）
-                double lufs = -0.691 + 10 * Math.Log10(meanSquare + 1e-24);
-                blockLoudness.Add(lufs);
-
-                offset += hopSamples;
-            }
-
-            // 两阶段门限
-            double sum = 0; int count = 0;
-            foreach (double l in blockLoudness)
-            {
-                if (l > -70.0) { sum += Math.Pow(10, l / 10); count++; }
-            }
-            double integrated = -70;
-            if (count > 0)
-            {
-                double absGatedLufs = 10 * Math.Log10(sum / count);
-                double relThreshold = absGatedLufs - 10.0;
-                double sum2 = 0; int count2 = 0;
-                foreach (double l in blockLoudness)
-                {
-                    if (l > -70.0 && l > relThreshold) { sum2 += Math.Pow(10, l / 10); count2++; }
-                }
-                if (count2 > 0) integrated = 10 * Math.Log10(sum2 / count2);
-            }
-
-            double gainDb = Math.Max(-40, Math.Min(MaxGainDb, ReferenceLufs - integrated));
-            return new Result { IntegratedLufs = integrated, GainDb = gainDb, Peak = peak };
+            var analyzer = new StreamingAnalyzer(channels, sampleRate);
+            analyzer.Add(interleaved, interleaved.Length, CancellationToken.None);
+            return analyzer.Complete(CancellationToken.None);
         }
 
-        /// <summary>分析文件（全解码；后台线程调用）。失败返回 null。</summary>
-        public static Result? AnalyzeFile(string path)
+        /// <summary>流式分析，不取得输入源的所有权；读取块大小不会改变滤波状态或测量窗口。</summary>
+        public static Result AnalyzeStream(ISampleProvider source, CancellationToken cancellationToken = default)
         {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            cancellationToken.ThrowIfCancellationRequested();
+            var analyzer = new StreamingAnalyzer(source.WaveFormat.Channels, source.WaveFormat.SampleRate);
+            var buffer = new float[4096 * source.WaveFormat.Channels];
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int read = source.Read(buffer, 0, buffer.Length);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (read == 0) break;
+                analyzer.Add(buffer, read, cancellationToken);
+            }
+            return analyzer.Complete(cancellationToken);
+        }
+
+        // 仅保留 400ms 帧能量环和每 100ms 一个块能量；不保留整首 PCM。
+        sealed class StreamingAnalyzer
+        {
+            readonly int _channels;
+            readonly int _hopFrames;
+            readonly Biquad[] _shelf;
+            readonly Biquad[] _hp;
+            readonly double[] _window;
+            readonly List<double> _blocks = new List<double>();
+            int _channel, _windowPos;
+            long _frames;
+            double _frameEnergy, _windowEnergy, _peak;
+
+            public StreamingAnalyzer(int channels, int sampleRate)
+            {
+                if (channels < 1 || channels > 2)
+                    throw new NotSupportedException("响度分析仅支持已知的单声道或立体声布局，不推测多声道顺序。");
+                if (sampleRate <= 0) throw new ArgumentOutOfRangeException(nameof(sampleRate));
+                _channels = channels;
+                _hopFrames = Math.Max(1, (int)(0.1 * sampleRate));
+                _window = new double[Math.Max(1, (int)(0.4 * sampleRate))];
+                _shelf = new Biquad[channels];
+                _hp = new Biquad[channels];
+                for (int c = 0; c < channels; c++)
+                {
+                    _shelf[c] = DesignShelf(sampleRate);
+                    _hp[c] = DesignHighPass(sampleRate);
+                }
+            }
+
+            public void Add(float[] samples, int count, CancellationToken token)
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    if ((i & 4095) == 0) token.ThrowIfCancellationRequested();
+                    double sample = samples[i];
+                    if (!double.IsFinite(sample)) throw new InvalidDataException("音频包含非有限样本");
+                    _peak = Math.Max(_peak, Math.Abs(sample));
+                    double weighted = _hp[_channel].Process(_shelf[_channel].Process(sample));
+                    _frameEnergy += weighted * weighted;
+                    if (++_channel != _channels) continue;
+                    _channel = 0;
+                    _windowEnergy += _frameEnergy - _window[_windowPos];
+                    _window[_windowPos] = _frameEnergy;
+                    _windowPos = (_windowPos + 1) % _window.Length;
+                    _frameEnergy = 0;
+                    _frames++;
+                    if (_frames >= _window.Length && (_frames - _window.Length) % _hopFrames == 0)
+                        _blocks.Add(Math.Max(0, _windowEnergy) / _window.Length);
+                }
+            }
+
+            public Result Complete(CancellationToken token)
+            {
+                token.ThrowIfCancellationRequested();
+                if (_channel != 0) throw new InvalidDataException("音频以不完整声道帧结束");
+                // 不足 400ms 时保持短片段单块分析的兼容语义。
+                if (_blocks.Count == 0 && _frames > 0) _blocks.Add(_windowEnergy / _frames);
+                double absoluteGate = Math.Pow(10, (-70 + 0.691) / 10);
+                double sum = 0;
+                int count = 0;
+                foreach (double energy in _blocks)
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (energy > absoluteGate) { sum += energy; count++; }
+                }
+                double integrated = -70;
+                if (count > 0)
+                {
+                    double relativeGate = sum / count * 0.1;
+                    sum = 0;
+                    count = 0;
+                    foreach (double energy in _blocks)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        if (energy > absoluteGate && energy > relativeGate) { sum += energy; count++; }
+                    }
+                    if (count > 0) integrated = -0.691 + 10 * Math.Log10(sum / count);
+                }
+                return new Result
+                {
+                    IntegratedLufs = integrated,
+                    GainDb = Math.Clamp(ReferenceLufs - integrated, -40, MaxGainDb),
+                    Peak = _peak
+                };
+            }
+        }
+
+        /// <summary>后台流式解码分析；解码失败返回 null，取消向调用方传播。</summary>
+        public static Result? AnalyzeFile(string path, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 using (WaveStream reader = AudioDecoders.Open(path))
-                {
-                    ISampleProvider sp = reader.ToSampleProvider();
-                    int ch = sp.WaveFormat.Channels;
-                    int sr = sp.WaveFormat.SampleRate;
-                    if (ch > 2) ch = 2;
-
-                    var all = new System.Collections.Generic.List<float>(1 << 20);
-                    var buf = new float[sr * ch];   // 1 秒缓冲
-                    int n;
-                    while ((n = sp.Read(buf, 0, buf.Length)) > 0)
-                    {
-                        // 多声道取前二（与播放管线一致）
-                        if (sp.WaveFormat.Channels <= 2)
-                        {
-                            for (int i = 0; i < n; i++) all.Add(buf[i]);
-                        }
-                        else
-                        {
-                            int frames = n / sp.WaveFormat.Channels;
-                            for (int f = 0; f < frames; f++)
-                            {
-                                all.Add(buf[f * sp.WaveFormat.Channels]);
-                                all.Add(buf[f * sp.WaveFormat.Channels + 1]);
-                            }
-                        }
-                    }
-                    return AnalyzeSamples(all.ToArray(), ch, sr);
-                }
+                    return AnalyzeStream(reader.ToSampleProvider(), cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 MainViewModel.Dbg("Loudness.AnalyzeFile FAIL: " + path + " -> " + ex.Message);
@@ -218,6 +231,7 @@ namespace Aurora
         /// </summary>
         public static double LinearFor(double gainDb, double peak)
         {
+            if (!double.IsFinite(gainDb) || !double.IsFinite(peak) || peak < 0) return 1.0;
             double db = Math.Max(-40, Math.Min(MaxGainDb, gainDb));
             double linear = Math.Pow(10, db / 20.0);
             if (peak > 0.0001)

@@ -104,7 +104,10 @@ namespace Aurora
         /// <summary>窗口关闭时停掉本控制器的计时器。</summary>
         public void StopTimers()
         {
-            try { volAutoCloseTimer?.Stop(); } catch { }
+            volAutoCloseTimer?.Stop();
+            volPopup.IsOpen = false;
+            vm.PropertyChanged -= OnVmPropertyChanged;
+            vm.CurrentTrackChanged -= OnCurrentTrackChanged;
         }
 
         /* ============================================================
@@ -120,7 +123,7 @@ namespace Aurora
             }
             else if (e.PropertyName == nameof(vm.Mode))
             {
-                int m = (int)vm.Mode;
+                int m = Enum.IsDefined(vm.Mode) ? (int)vm.Mode : 0;
                 icoRepeat.Visibility = (m == 0) ? Visibility.Visible : Visibility.Collapsed;
                 icoOne.Visibility = (m == 1) ? Visibility.Visible : Visibility.Collapsed;
                 icoShuffle.Visibility = (m == 2) ? Visibility.Visible : Visibility.Collapsed;
@@ -180,6 +183,7 @@ namespace Aurora
             if (e.LoadFailed)
             {
                 UpdateTrackInfo(null);
+                smtc?.UpdateMetadata(null);
                 lyrics.Render(null);
                 // 复位残留状态：窗口标题/时间/进度条不能停留在上一首
                 win.Title = "Aurora · 极光音乐";
@@ -194,6 +198,7 @@ namespace Aurora
             {
                 // 删除当前曲等场景：完整复位界面，不留上一首的标题/时间/进度残影
                 UpdateTrackInfo(null);
+                smtc?.UpdateMetadata(null);
                 lyrics.Render(null);
                 win.Title = "Aurora · 极光音乐";
                 vm.TotalTimeText = "0:00";
@@ -213,7 +218,7 @@ namespace Aurora
             if (smtc != null) smtc.UpdateMetadata(t);   // P2-5：系统媒体浮层元数据
             vm.CurrentTimeText = "0:00";
             tick.SetSeekUi(0, false);
-            win.Title = t.Title + (t.Artist.Length > 0 ? " - " + t.Artist : "") + " · Aurora";
+            win.Title = t.Title + (!string.IsNullOrEmpty(t.Artist) ? " - " + t.Artist : "") + " · Aurora";
 
             // 切歌过渡：标题/歌手/黑胶封面/歌词区柔和淡入，替代生硬的内容跳变
             UiUtil.FadeIn(fpTitle);
@@ -292,6 +297,7 @@ namespace Aurora
         {
             if (t == null)
             {
+                vinylCover.ImageSource = null;
                 fpTitle.Text = "未在播放";
                 fpArtist.Text = "双击 MP3 文件、或将音乐直接拖进窗口";
                 fpTitle.Foreground = (Brush)root.TryFindResource("Dim");
@@ -300,7 +306,7 @@ namespace Aurora
                 return;
             }
             fpTitle.Text = t.Title;
-            fpArtist.Text = t.Artist.Length > 0 ? t.Artist : "未知歌手";
+            fpArtist.Text = !string.IsNullOrEmpty(t.Artist) ? t.Artist : "未知歌手";
             fpTitle.Foreground = (Brush)root.TryFindResource("Text");
             fpArtist.Foreground = (Brush)root.TryFindResource("Dim");
             if (fpTitleBar != null) fpTitleBar.Visibility = Visibility.Visible;

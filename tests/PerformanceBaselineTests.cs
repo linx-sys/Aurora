@@ -20,7 +20,7 @@ namespace Aurora.Tests
         readonly string dbPath = Path.Combine(Path.GetTempPath(), "aurora_perf_" + Guid.NewGuid().ToString("N") + ".db");
         readonly string root = Path.Combine(Path.GetTempPath(), "aurora_perf_" + Guid.NewGuid().ToString("N"));
 
-        LibraryDatabase db;
+        LibraryDatabase? db;
 
         LibraryDatabase Db
         {
@@ -35,6 +35,7 @@ namespace Aurora.Tests
 
         public void Dispose()
         {
+            db?.Dispose();
             try { Directory.Delete(root, true); } catch { }
             try { File.Delete(dbPath); } catch { }
             try { File.Delete(dbPath + "-wal"); } catch { }

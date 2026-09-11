@@ -21,8 +21,10 @@ namespace Aurora
         /// <summary>整体替换全部元素，只发出一次 Reset 集合变更通知。</summary>
         public void ReplaceAll(IEnumerable<T> items)
         {
+            CheckReentrancy();
+            var snapshot = items.ToList();
             Items.Clear();
-            foreach (T item in items)
+            foreach (T item in snapshot)
                 Items.Add(item);
             OnPropertyChanged(new System.ComponentModel.PropertyChangedEventArgs("Count"));
             OnPropertyChanged(new System.ComponentModel.PropertyChangedEventArgs("Item[]"));
@@ -37,6 +39,18 @@ namespace Aurora
     /// </summary>
     public class PlaylistManager
     {
+        public const int SortModeCount = 6;
+
+        public static string GetSortModeName(int mode) => mode switch
+        {
+            1 => "标题",
+            2 => "歌手",
+            3 => "时长升序",
+            4 => "时长降序",
+            5 => "自定义顺序",
+            _ => "文件名"
+        };
+
         /// <summary>全量播放列表（可观察集合，UI 自动更新）。</summary>
         public BatchObservableCollection<Track> Tracks { get; private set; }
 
@@ -64,7 +78,7 @@ namespace Aurora
         public int SortMode
         {
             get => _sortMode;
-            set { _sortMode = value; RefreshView(); }
+            set { _sortMode = value >= 0 && value < SortModeCount ? value : 0; RefreshView(); }
         }
 
         /// <summary>整体替换全量列表（换目录扫描后重建），单次批量通知。</summary>
@@ -78,14 +92,21 @@ namespace Aurora
         public int AddRange(IEnumerable<Track> tracks)
         {
             if (tracks == null) return 0;
+            var combined = Tracks.ToList();
+            var paths = new HashSet<string>(
+                combined.Select(t => LibraryPath.Normalize(t.FilePath)), StringComparer.OrdinalIgnoreCase);
             int added = 0;
             foreach (var t in tracks)
             {
-                if (t == null) continue;
-                bool exists = Tracks.Any(x => string.Equals(x.FilePath, t.FilePath, StringComparison.OrdinalIgnoreCase));
-                if (!exists) { Tracks.Add(t); added++; }
+                if (t == null || !paths.Add(LibraryPath.Normalize(t.FilePath))) continue;
+                combined.Add(t);
+                added++;
             }
-            if (added > 0) RefreshView();
+            if (added > 0)
+            {
+                Tracks.ReplaceAll(combined);
+                RefreshView();
+            }
             return added;
         }
 
@@ -123,7 +144,7 @@ namespace Aurora
         {
             if (string.IsNullOrEmpty(path)) return null;
             return Tracks.FirstOrDefault(t =>
-                string.Equals(t.FilePath, path, StringComparison.OrdinalIgnoreCase));
+                LibraryPath.Same(t.FilePath, path));
         }
 
         /// <summary>重新计算筛选/排序后的 View。</summary>
