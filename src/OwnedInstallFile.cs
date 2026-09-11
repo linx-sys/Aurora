@@ -23,6 +23,15 @@ namespace Aurora
         [StructLayout(LayoutKind.Sequential)]
         struct AttributeTag { public uint Attributes; public uint Tag; }
         static IOException Error(string path) => new IOException("文件操作失败：" + path, new Win32Exception(Marshal.GetLastWin32Error()));
+        // 原生调用不享受 BCL 的长路径支持，必须显式转为扩展长度路径，
+        // 否则深层安装目录（含 .AuroraInstall-<sha256> 恢复目录）会撞 MAX_PATH 报“文件名或扩展名太长”。
+        static string Extended(string path)
+        {
+            string full = Path.GetFullPath(path);
+            if (full.StartsWith(@"\\?\", StringComparison.Ordinal)) return full;
+            if (full.StartsWith(@"\\", StringComparison.Ordinal)) return @"\\?\UNC\" + full.Substring(2);
+            return @"\\?\" + full;
+        }
         static void RejectLink(SafeFileHandle handle, string path)
         {
             if (!GetFileInformationByHandleEx(handle, 9, out var info, 8)) throw Error(path);
@@ -43,7 +52,7 @@ namespace Aurora
                         foreach (string p in chain)
                         {
                             if (!seen.Add(p)) continue;
-                            var h = CreateFileW(p, 0x80, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+                            var h = CreateFileW(Extended(p), 0x80, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
                             if (h.IsInvalid)
                             {
                                 int code = Marshal.GetLastWin32Error(); h.Dispose();
@@ -63,7 +72,7 @@ namespace Aurora
         internal static bool MoveVerified(string source, string destination, string hash, Action? whileLocked = null)
         {
             using var dirs = new DirectoryGuard(Path.GetDirectoryName(source)!, Path.GetDirectoryName(destination)!);
-            using var handle = CreateFileW(source, 0x80010000, 0, IntPtr.Zero, 3, 0x08200000, IntPtr.Zero);
+            using var handle = CreateFileW(Extended(source), 0x80010000, 0, IntPtr.Zero, 3, 0x08200000, IntPtr.Zero);
             if (handle.IsInvalid)
             {
                 int code = Marshal.GetLastWin32Error();
@@ -74,10 +83,12 @@ namespace Aurora
             using var stream = new FileStream(handle, FileAccess.Read);
             if (!string.Equals(Convert.ToHexString(SHA256.HashData(stream)), hash, StringComparison.OrdinalIgnoreCase)) return false;
             whileLocked?.Invoke();
-            byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+            byte[] name = Encoding.Unicode.GetBytes(Extended(destination));
             int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
             int nameOffset = lengthOffset + 4;
-            int size = nameOffset + name.Length;
+            // 名字后必须留 2 字节 NUL 终止符：内核按终止符读文件名字符串，只给 FileNameLength 会在
+            // 分配区外继续读，把相邻堆内存写进文件名（实测产生 "AuroraPlayer.exeon" 这类乱码尾巴）。
+            int size = nameOffset + name.Length + 2;
             IntPtr buffer = Marshal.AllocHGlobal(size);
             try
             {
