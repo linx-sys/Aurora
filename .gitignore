@@ -37,3 +37,6 @@ testmusic/陈奕迅 - 富士山下.lrc
 testmusic/陈奕迅 - 富士山下.jpg
 testmusic/张韶涵-无度.lrc
 testmusic/张韶涵-无度.jpg
+
+# Python 缓存
+tools/machine-verify/__pycache__/

@@ -39,7 +39,7 @@ dotnet test tests/Aurora.Tests.csproj                    # 全量测试（无声
 ## 提交规范
 
 `<type>: 中文摘要`（type：feat / fix / refactor / docs / test / perf / build / ci）；
-跨阶段大改动在正文列分项说明。每次功能性提交保持全量测试全绿（当前实测 392 例，见 CHANGELOG 口径说明）。
+跨阶段大改动在正文列分项说明。每次功能性提交保持全量测试全绿（当前实测 397 例，见 CHANGELOG 口径说明）。
 
 ## 日志与诊断
 

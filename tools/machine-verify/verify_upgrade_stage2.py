@@ -1,8 +1,8 @@
-"""Aurora 真机升级验证（阶段 2）：构造 3.0.1 产物，覆盖 3.0.0 安装。
+"""Aurora 真机升级验证（阶段 2）：构造"当前版本 +1 patch"的升级包，覆盖当前版本安装。
 
 安全边界同阶段 1：
 - 只在 outputs/machine-verify 下操作，不触碰 D:\\Applications\\Aurora。
-- 临时把 AppInfo.Version 改为 3.0.1 构建升级包，finally 里必定还原源码并重建，
+- 临时把 AppInfo.Version 提升一个 patch 构建升级包，finally 里必定还原源码并重建，
   保证结束时不留下任何源码改动。
 - 静默安装带 /noassoc /nodesktop，不改动用户文件关联。
 """
@@ -30,6 +30,14 @@ def sha256(path):
     return h.hexdigest().upper()
 
 
+# Bash 子进程缺少这些变量时 dotnet 会报 Value cannot be null. (Parameter 'path1')
+BUILD_ENV = dict(os.environ)
+BUILD_ENV.setdefault("APPDATA", "C:\\Users\\Jinwei\\AppData\\Roaming")
+BUILD_ENV.setdefault("ProgramFiles", "C:\\Program Files")
+BUILD_ENV.setdefault("ProgramFiles(x86)", "C:\\Program Files (x86)")
+BUILD_ENV.setdefault("ProgramW6432", "C:\\Program Files")
+
+
 def dec(raw):
     for enc in ("gbk", "utf-8"):
         try:
@@ -40,7 +48,7 @@ def dec(raw):
 
 
 def run(args, timeout=600):
-    p = subprocess.run([str(a) for a in args], capture_output=True, timeout=timeout)
+    p = subprocess.run([str(a) for a in args], capture_output=True, timeout=timeout, env=BUILD_ENV)
     return p.returncode, dec(p.stdout or b""), dec(p.stderr or b"")
 
 
@@ -98,54 +106,71 @@ def build_variant(version, target_exe):
         run([SDK, "build", str(REPO / "AuroraPlayer.csproj"), "-c", "Release", "-v", "minimal", "--nologo"])
 
 
+def current_version():
+    m = re.search(r'public const string Version = "([^"]+)"', APPINFO.read_text(encoding="utf-8"))
+    assert m, "无法从 AppInfo.cs 读取版本号"
+    return m.group(1)
+
+
+def next_patch(version):
+    parts = version.split(".")
+    parts[-1] = str(int(parts[-1]) + 1)
+    return ".".join(parts)
+
+
 def main():
     ART.mkdir(parents=True, exist_ok=True)
-    v0 = ART / "setup-3.0.0.exe"
-    v1 = ART / "setup-3.0.1.exe"
+    V0 = current_version()          # 当前版本（= 已被安装的旧版本）
+    V1 = next_patch(V0)             # 构造出的升级版本
+    print(f"升级路径：{V0} → {V1}")
+    v0 = ART / f"setup-{V0}.exe"
+    v1 = ART / f"setup-{V1}.exe"
 
     print("=== 准备产物 ===")
     shutil.copy2(SETUP, v0)
-    print("3.0.0 安装器:", v0.stat().st_size, "bytes")
-    ok = build_variant("3.0.1", v1)
-    check("准备: 3.0.1 升级包构建成功", ok and v1.is_file(), f"{v1.stat().st_size if v1.is_file() else '-'} bytes")
-    check("准备: 源码版本号已还原", 'Version = "3.0.0"' in APPINFO.read_text(encoding="utf-8"))
+    print(f"{V0} 安装器:", v0.stat().st_size, "bytes")
+    ok = build_variant(V1, v1)
+    check(f"准备: {V1} 升级包构建成功", ok and v1.is_file(), f"{v1.stat().st_size if v1.is_file() else '-'} bytes")
+    check("准备: 源码版本号已还原", f'Version = "{V0}"' in APPINFO.read_text(encoding="utf-8"))
 
     target = ROOT / "upgrade" / "Aurora"
     if target.parent.exists():
         shutil.rmtree(target.parent, ignore_errors=True)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    print("\n=== 安装 3.0.0 ===")
+    print(f"\n=== 安装 {V0} ===")
     code, out, err = install(target, v0)
-    check("升级前: 3.0.0 安装成功", code == 0, f"code={code} err={err[-200:]}")
+    check(f"升级前: {V0} 安装成功", code == 0, f"code={code} err={err[-200:]}")
     m = read_manifest(target)
-    check("升级前: 清单版本 3.0.0", pick(m, "version", "Version") == "3.0.0", pick(m, "version", "Version"))
-    check("升级前: 注册表 DisplayVersion 3.0.0", (reg_query() or {}).get("DisplayVersion") == "3.0.0", reg_query())
+    check(f"升级前: 清单版本 {V0}", pick(m, "version", "Version") == V0, pick(m, "version", "Version"))
+    check(f"升级前: 注册表 DisplayVersion {V0}", (reg_query() or {}).get("DisplayVersion") == V0, reg_query())
     (target / "music.mp3").write_text("user music", encoding="utf-8")
     (target / "user").mkdir(exist_ok=True)
     (target / "user" / "notes.txt").write_text("user notes", encoding="utf-8")
     before = {pick(f, "relativePath", "RelativePath"): pick(f, "sha256", "Sha256") for f in pick(m, "files", "Files")}
 
-    print("\n=== 覆盖安装 3.0.1（升级）===")
+    print(f"\n=== 覆盖安装 {V1}（升级）===")
     code, out, err = install(target, v1)
     check("升级: 安装器退出码 0", code == 0, f"code={code} err={err[-300:]}")
     m2 = read_manifest(target)
-    check("升级: 清单版本已变为 3.0.1", pick(m2, "version", "Version") == "3.0.1", pick(m2, "version", "Version"))
-    check("升级: 注册表 DisplayVersion 已变为 3.0.1", (reg_query() or {}).get("DisplayVersion") == "3.0.1", reg_query())
+    check(f"升级: 清单版本已变为 {V1}", pick(m2, "version", "Version") == V1, pick(m2, "version", "Version"))
+    check(f"升级: 注册表 DisplayVersion 已变为 {V1}", (reg_query() or {}).get("DisplayVersion") == V1, reg_query())
     changed = [pick(f, "relativePath", "RelativePath") for f in pick(m2, "files", "Files") if before.get(pick(f, "relativePath", "RelativePath")) != pick(f, "sha256", "Sha256")]
-    # apphost 桩 AuroraPlayer.exe 不随版本变化，版本号体现在主 DLL 与 runtimeconfig 上
-    check("升级: 主程序文件确实被替换（哈希变化）", "AuroraPlayer.dll" in changed and "AuroraPlayer.runtimeconfig.json" in changed, changed)
+    # 版本号只体现在 AuroraPlayer.dll 上：apphost（.exe）是桩、runtimeconfig 不含应用版本，
+    # 两者都可能逐字节不变，不能拿它们当升级判据。
+    check("升级: 主程序 DLL 确实被替换（哈希变化）", "AuroraPlayer.dll" in changed, changed)
     bad = [pick(f, "relativePath", "RelativePath") for f in pick(m2, "files", "Files") if sha256(target / pick(f, "relativePath", "RelativePath")) != pick(f, "sha256", "Sha256")]
     check("升级: 升级后每个文件哈希与清单一致", not bad, bad)
     check("升级: 注册表 ManifestSha256 已同步", (reg_query() or {}).get("ManifestSha256") == sha256(target / MANIFEST_NAME))
     check("升级: 用户文件保留", (target / "music.mp3").exists() and (target / "user" / "notes.txt").exists())
     state = [p for p in target.parent.iterdir() if p.name.startswith(".AuroraInstall-")]
-    backups = []
+    # v3.0.3 起：提交成功后即删除本事务的载荷副本（.old/.new/replaced-*），只保留事务日志
+    payload_left = []
     for s in state:
         for sub in s.iterdir():
             if sub.is_dir():
-                backups += [f.name for f in sub.iterdir() if f.suffix == ".old"]
-    check("升级: 旧文件已留审计备份（.old）", any(n.endswith(".old") for n in backups), sorted(set(backups))[:6])
+                payload_left += [f.name for f in sub.iterdir()]
+    check("升级: 提交后不保留载荷副本（.old/.new/replaced-*）", not payload_left, sorted(payload_left)[:8])
     phases = []
     for s in state:
         j = s / "active.json"

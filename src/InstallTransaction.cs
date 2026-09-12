@@ -66,9 +66,80 @@ namespace Aurora
             InstallManifest.EnsureNoReparsePoints(lockPath);
             gate = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         }
+
+        /// <summary>Work 子目录名 = 32 位十六进制的 <see cref="Journal.Id"/>。</summary>
+        static bool IsWorkDirectoryName(string name)
+        {
+            if (name.Length != 32) return false;
+            foreach (char c in name)
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// 回收被取代的旧事务目录：每个事务一个 Work 子目录，日志只指向最近一次，
+        /// 旧目录（含旧版本二进制副本）已无追溯价值，不回收会随安装次数线性增长。
+        /// 调用时已持有 transaction.lock（独占），不存在并发事务；删除失败只忽略，绝不影响安装结果。
+        /// </summary>
+        void RetireSupersededWorkDirs(string keepId)
+        {
+            try
+            {
+                foreach (string path in Directory.EnumerateDirectories(state))
+                {
+                    string name = Path.GetFileName(path);
+                    if (!IsWorkDirectoryName(name) || string.Equals(name, keepId, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { Directory.Delete(path, true); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
+            }
+            catch (DirectoryNotFoundException) { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        /// <summary>提交完成后删除本事务的载荷副本（.old/.new/replaced-*），只保留事务日志 active.json。</summary>
+        void CleanupCommittedPayload(Journal j)
+        {
+            try { Directory.Delete(Work(j), true); }
+            catch (DirectoryNotFoundException) { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        /// <summary>
+        /// 卸载完成后调用：仅当状态目录内没有未决事务（无日志，或已处于 Committed / RolledBack 终态）时
+        /// 递归删除状态目录本身。任何解析/删除失败都返回 false（保守：宁可留着也不误删）。
+        /// </summary>
+        internal static bool TryRemoveStateDirectory(string directory)
+        {
+            string canonical;
+            try { canonical = InstallManifest.ValidateInstallDirectory(directory); }
+            catch (Exception ex) when (ex is InvalidDataException || ex is IOException || ex is UnauthorizedAccessException) { return false; }
+            string state = StateDirectory(canonical);
+            if (!Directory.Exists(state)) return false;
+            try
+            {
+                string active = Path.Combine(state, "active.json");
+                if (File.Exists(active))
+                {
+                    using var stream = new FileStream(active, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    if (stream.Length > 131072) return false;
+                    using var document = JsonDocument.Parse(stream);
+                    if (!document.RootElement.TryGetProperty("Phase", out var phase)) return false;
+                    string value = phase.GetString() ?? "";
+                    if (value != "Committed" && value != "RolledBack") return false;
+                }
+                InstallManifest.EnsureNoReparsePoints(state);
+                Directory.Delete(state, true);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is InvalidDataException || ex is JsonException) { return false; }
+        }
+
         string Active => Path.Combine(state, "active.json");
-        string Work(Journal j) => Path.Combine(state, j.Id);
-        string Backup(Journal j, int i) => Path.Combine(Work(j), i + ".old");
+        string Work(Journal j) => Path.Combine(state, j.Id);        string Backup(Journal j, int i) => Path.Combine(Work(j), i + ".old");
         string Stage(Journal j, int i) => Path.Combine(Work(j), i + ".new");
         string Target(Entry e) => e.Name == InstallManifest.FileName ? Path.Combine(dir, e.Name) : InstallManifest.ResolveFile(dir, e.Name);
         static string Hash(byte[] data) => Convert.ToHexString(SHA256.HashData(data));
@@ -110,7 +181,8 @@ namespace Aurora
             InstallManifest.EnsureNoReparsePoints(Work(j));
             return j;
         }
-        // 已完成事务保留审计备份，不在卸载时递归删除旁路目录。
+        // 只负责回滚，不负责清理：载荷副本在提交成功后即删除，其余旧址由下一次事务回收，
+        // 卸载彻底完成时由 Uninstaller 调 TryRemoveStateDirectory 删除整个状态目录。
         internal string Recover(Action<string>? checkpoint = null)
         {
             var j = Load();
@@ -185,16 +257,25 @@ namespace Aurora
         static void ReplaceChecked(string source, string target, string? expected)
         {
             using var guard = new OwnedInstallFile.DirectoryGuard(Path.GetDirectoryName(source)!, Path.GetDirectoryName(target)!);
+            string? aside = null;
             string? current = OwnedInstallFile.ReadHash(target);
             if (current != null)
             {
-                if (expected == null || !OwnedInstallFile.MoveVerified(target,
-                    Path.Combine(Path.GetDirectoryName(source)!, "replaced-" + Guid.NewGuid().ToString("N")), expected))
+                aside = Path.Combine(Path.GetDirectoryName(source)!, "replaced-" + Guid.NewGuid().ToString("N"));
+                if (expected == null || !OwnedInstallFile.MoveVerified(target, aside, expected))
                     throw new IOException("文件在提交期间改变：" + target);
             }
             // 中断发生在旧文件移走后，新文件落地前，日志仍可从已刷盘备份恢复。
             string sourceHash = InstallManifest.HashFile(source);
             if (!OwnedInstallFile.MoveVerified(source, target, sourceHash)) throw new IOException("暂存文件发生改变。");
+            // 旧内容此时已在准备阶段的 N.old 备份里（ValidateBackups 已校验），移出件不再保留：
+            // 否则每次覆盖安装/升级都会留下两份旧二进制（实测单次约 56 MB）。
+            if (aside != null)
+            {
+                try { File.Delete(aside); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
         }
         internal InstallManifest Execute(IReadOnlyDictionary<string, byte[]> payload, string version,
             CancellationToken token = default, Action<string>? checkpoint = null)
@@ -213,6 +294,8 @@ namespace Aurora
             manifest.Validate(dir);
             data.Add(InstallManifest.FileName, manifest.Serialize());
             var j = new Journal { Directory = dir, Id = Guid.NewGuid().ToString("N") };
+            // 上一个事务已在上面的 Recover() 里落定（Committed/RolledBack），其 Work 目录已无追溯价值，先回收
+            RetireSupersededWorkDirs(j.Id);
             foreach (var p in data.Where(p => p.Key != InstallManifest.FileName))
                 j.Files.Add(new Entry { Name = p.Key, NewHash = Hash(p.Value) });
             // 旧版本受管理但新版本不再分发的文件也须纳入事务，未知文件保持原状。
@@ -276,6 +359,8 @@ namespace Aurora
                 token.ThrowIfCancellationRequested();
                 j.Phase = "Committed";
                 Save(j); // 持久提交点；之后取消不再回滚，登记可通过重试幂等补齐。
+                // 提交完成：.old/.new/replaced-* 载荷副本已无用途，删除以控制审计目录残留（只留日志）
+                CleanupCommittedPayload(j);
                 return manifest;
             }
             catch (Exception error)

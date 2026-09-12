@@ -40,12 +40,17 @@ namespace Aurora
                         throw new InvalidDataException("卸载参数无效，未执行清理。");
                     string dir = InstallManifest.ValidateInstallDirectory(args[1]);
                     WaitForOriginalUninstaller(parentId, Path.Combine(dir, "unins.exe"));
-                    using var transaction = new InstallTransaction(dir);
-                    transaction.Recover();
-                    InstallManifest manifest = LoadRegisteredManifest(dir, args[2], out string manifestHash);
-                    ValidateTemporaryCopy(selfExe, manifest);
-                    WaitForOriginalUninstaller(parentId, Path.Combine(dir, "unins.exe"));
-                    PerformUninstall(dir, manifest, manifestHash);
+                    {
+                        using var transaction = new InstallTransaction(dir);
+                        transaction.Recover();
+                        InstallManifest manifest = LoadRegisteredManifest(dir, args[2], out string manifestHash);
+                        ValidateTemporaryCopy(selfExe, manifest);
+                        WaitForOriginalUninstaller(parentId, Path.Combine(dir, "unins.exe"));
+                        PerformUninstall(dir, manifest, manifestHash);
+                    }
+                    // 卸载彻底完成（安装目录已被删除）且状态目录里没有未决事务时，一并清掉同级审计目录。
+                    // 目录里若还留着用户文件（安装目录未删），按设计保留状态目录，不递归删除。
+                    if (!Directory.Exists(dir)) InstallTransaction.TryRemoveStateDirectory(dir);
                     if (!silent) MessageBox.Show("卸载完成。修改过的文件、未知文件及用户音乐均已保留。", "Aurora", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return 0;
                 }

@@ -16,7 +16,7 @@ namespace Aurora
     public static class AppInfo
     {
         /// <summary>应用版本（更新检查据此比较；发布时打 tag v{Version}）。</summary>
-        public const string Version = "3.0.2";
+        public const string Version = "3.0.3";
 
         public const string RepoUrl = "https://github.com/linx-sys/Aurora";
         public const string ReleasesUrl = RepoUrl + "/releases";

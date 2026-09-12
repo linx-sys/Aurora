@@ -1,8 +1,9 @@
 #nullable disable // Nullable 迁移过渡（阶段 1 批次 2）：UI 层控件/WinRT/注册表互操作字段较多，待后续批次清理
 /* ============================================================
- * Assoc.cs — MP3 文件关联（HKCU，无需管理员权限）
- * 由 AuroraPlayer.exe 自身执行：AuroraPlayer.exe /associate
- * 路径取自程序自身位置，安装向导以 /associate 参数调用。
+ * Assoc.cs — 音频文件关联（HKCU，无需管理员权限）
+ * 入口：AuroraPlayer.exe /associate（显式）或安装后首启读取安装目录下的 .associate 标记。
+ * 只写 HKCU\Software\Classes 下的 ProgID 与扩展名默认值；
+ * 不改动 FileExts\<ext>\UserChoice（系统默认应用记录），需要设为默认时引导用户去系统设置。
  * ============================================================ */
 using System;
 using System.IO;
@@ -122,14 +123,10 @@ namespace Aurora
                     }
                     using (var ow = CreateClassesKey(ext, "OpenWithProgids"))
                         ow.SetValue(ProgId, "");
-                    // 移除旧的用户选择，让关联立即生效
-                    try
-                    {
-                        Registry.CurrentUser.DeleteSubKeyTree(string.Join(
-                            "\\", "Software", "Microsoft", "Windows", "CurrentVersion", "Explorer", "FileExts", ext, "UserChoice"),
-                            false);
-                    }
-                    catch (Exception ex) { Log("UserChoice " + ext + ": " + ex.Message); }
+                    // 刻意不触碰 FileExts\<ext>\UserChoice：那是用户在系统里显式选定默认程序的记录
+                    // （带系统校验 Hash）。删除它等于在用户毫无感知的情况下抢走默认关联，且卸载时无法还原；
+                    // 部分系统该键受 ACL 保护，删也会失败，行为因机器而异。
+                    // 需要把 Aurora 设为默认时，走设置里的"设为默认播放器"前往系统设置由用户自行选择。
                 }
                 using (var app = CreateClassesKey("Applications", ExeName, "shell", "open", "command"))
                     app.SetValue(null, openValue);

@@ -76,7 +76,7 @@ AuroraPlayer.exe /unassociate   # 取消关联并清理注册表项
 | 播放模式 | 列表循环 / 单曲循环 / 随机（随机维护播放轨迹：上一首真回退、下一首可前进） |
 | 封面 | 内嵌封面优先；无封面按歌名生成专属渐变封面（10 组极光配色） |
 | 记忆 | 上次文件夹（DB 秒开恢复）、音量、播放模式、主题、上次播放曲目，重启自动恢复 |
-| 系统集成 | SMTC 媒体键/锁屏控制/系统媒体浮层 · 任务栏进度条 · JumpList 最近播放 · 9 格式文件关联 |
+| 系统集成 | SMTC 媒体键/锁屏控制/系统媒体浮层 · 任务栏进度条 · JumpList 最近播放 · 9 格式文件关联（**不覆盖你既有的默认播放器**；设置内可一键前往系统设置设为默认） |
 | 快捷键 | `空格` 播放暂停 · `←→` 快进快退 5 秒 · `↑↓` 音量（步进 5%）· `N/P` 切歌 · `M` 静音 · `Esc` 收起播放列表抽屉（搜索框内输入不触发快捷键） |
 | 音频管线 | 常驻混音器（48kHz float），多声道截断 / 单声道转立体声 / 重采样自动归一 |
 
@@ -95,7 +95,7 @@ AuroraPlayer.exe /unassociate   # 取消关联并清理注册表项
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1    # 4 步：主程序 → 卸载器 → 安装器 → Portable
-dotnet test tests/Aurora.Tests.csproj                 # 392 个单元测试
+dotnet test tests/Aurora.Tests.csproj                 # 397 个单元测试
 ```
 
 依赖：NAudio / NVorbis / Microsoft.Data.Sqlite 由 NuGet 锁定版本还原；Concentus（NuGet 未上架）随 `lib/` 提供，均为 MIT。CI（GitHub Actions）自动执行构建 + 测试，打 `v*` tag 自动发布 Release。

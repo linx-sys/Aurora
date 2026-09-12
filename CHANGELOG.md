@@ -4,7 +4,31 @@
 
 > **测试数字口径**：本文件"已发布版本"条目中的用例数记录**该版本发布时**的实测值；
 > 描述**当前状态**的文档（README / ARCHITECTURE / DEVELOPMENT / PROJECT_OVERVIEW）一律使用当前实测值。
-> 当前实测：**392 例**（`dotnet test tests/Aurora.Tests.csproj`，392 通过 / 0 失败 / 0 跳过）。
+> 当前实测：**397 例**（`dotnet test tests/Aurora.Tests.csproj`，397 通过 / 0 失败 / 0 跳过）。
+
+## [3.0.3] - 2026-09-13
+
+### 变更
+- **文件关联不再改动系统默认应用记录（方案 A）**：`Assoc.Register` 过去会删除
+  `FileExts\<ext>\UserChoice`——那是用户在系统里显式选定默认程序的记录（带系统校验 Hash），
+  删掉等于在用户毫无感知的情况下抢走 9 种音频格式的默认关联，且卸载时无法还原。
+  现在只写 `HKCU\Software\Classes` 下的 ProgID 与扩展名默认值；
+  需要把 Aurora 设为默认时，由设置里的**"前往系统设置…"**引导用户自行选择
+  （接入原本无人调用的 `Assoc.OpenDefaultAppsSettings()`）。
+
+### 修复与优化
+- **安装审计目录 `.AuroraInstall-<hash>` 不再无限增长**（原实现每个事务留一个子目录，永不回收，
+  实测一次覆盖安装/升级残留约 56 MB）：
+  - 提交成功后立即删除本事务的载荷副本（`.old` / `.new` / `replaced-*`），只保留事务日志 `active.json`；
+  - 弃用提交时产生的 `replaced-<guid>` 冗余副本（旧内容已在 `.old` 备份中并已校验），残留约减半；
+  - 开新事务时回收被取代的旧事务目录（日志只指向最近一次，旧目录无追溯价值）；
+  - 卸载彻底完成（安装目录已删除）且无未决事务时，删除状态目录本身。
+
+### 测试
+- 单元测试 392 → 397：新增审计目录清理策略回归（提交后无载荷副本、旧事务被回收、
+  无未决事务时可删状态目录、有 `Ready` 事务时拒绝删除）
+- 新增真机脚本 `tools/machine-verify/verify_assoc_stage4.py`：用真实产物验证
+  `/associate` 与 `/unassociate` 全程不改动 `UserChoice`，且关联命令指向 `AuroraPlayer.exe`
 
 ## [3.0.2] - 2026-09-13
 

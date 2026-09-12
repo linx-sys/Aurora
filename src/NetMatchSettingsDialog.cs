@@ -197,6 +197,31 @@ namespace Aurora
             cacheRow.Children.Add(cacheText);
             root.Children.Add(cacheRow);
 
+            // 默认播放器入口（v3.0.3 方案 A）：本程序不再自行改动系统默认关联，
+            // 只把用户引导到系统设置里自行选择（ms-settings:defaultapps）。
+            var assocText = new TextBlock
+            {
+                Text = "默认播放器：由 Windows 决定。本程序不会自行改动你的默认设置，需要设为默认时请前往系统设置选择。",
+                TextWrapping = TextWrapping.Wrap,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            var assocBtn = new Button
+            {
+                Content = "前往系统设置…",
+                Padding = new Thickness(12, 5, 12, 5),
+                Cursor = System.Windows.Input.Cursors.Hand,
+            };
+            assocBtn.Click += (s, e) =>
+            {
+                if (Assoc.OpenDefaultAppsSettings() && toast != null)
+                    toast("已打开系统设置，选择“Aurora 极光音乐”即可设为默认");
+            };
+            var assocRow = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 12, 0, 0) };
+            DockPanel.SetDock(assocBtn, Dock.Right);
+            assocRow.Children.Add(assocBtn);
+            assocRow.Children.Add(assocText);
+            root.Children.Add(assocRow);
+
             // 音频诊断入口（阶段 7）：查看当前解码格式/输出设备/增益等链路快照
             if (audioDiagnostics != null)
             {
