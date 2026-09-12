@@ -6,15 +6,28 @@
 > 描述**当前状态**的文档（README / ARCHITECTURE / DEVELOPMENT / PROJECT_OVERVIEW）一律使用当前实测值。
 > 当前实测：**392 例**（`dotnet test tests/Aurora.Tests.csproj`，392 通过 / 0 失败 / 0 跳过）。
 
-## [Unreleased]
+## [3.0.2] - 2026-09-13
 
 ### 修复
 - **文件关联命令指向了 `.dll`**：`src/Assoc.cs` 用 `Assembly.GetExecutingAssembly().Location` 取自身路径，
-  而框架依赖应用里该属性返回 `AuroraPlayer.dll`（单文件发布下是空串），于是"打开方式 → Aurora"无法启动。
+  而框架依赖应用里该属性返回 `AuroraPlayer.dll`（单文件发布下是空串），
+  于是关联命令被写成 `"…\AuroraPlayer.dll" "%1"` —— 用「打开方式 → Aurora」打开音频文件必然失败。
   改用 `Environment.ProcessPath`（回退 `AppContext.BaseDirectory` + `AuroraPlayer.exe`），并补 3 例回归测试。
 
+### 说明
+- 从 **v3.0.0 升级**：该版本的安装包漏嵌 `unins.dll`，其自带卸载器无法启动
+  （报 `The application to execute does not exist: …\unins.dll`，退出码 154），
+  Geek Uninstaller 与「应用和功能」因共用 `UninstallString` 同样失败。
+  **受影响的安装需先手工清除**（见下），再安装本版本；v3.0.1 起该问题已修复，
+  但 v3.0.0/v3.0.1 的安装目录都没有安装清单，**无法原地覆盖升级**，请先卸载或选择新的专用空目录。
+- v3.0.0 安装的清除范围：安装目录、`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\AuroraPlayer`、
+  `HKCU\Software\Classes\Aurora.Audio`（及 `Aurora.Audio.mp3`）、`Applications\AuroraPlayer.exe`、
+  9 种音频扩展名内的 Aurora 引用、开始菜单快捷方式。注意 `HKCU\Software\Classes\Audio`
+  **属于其他播放器（Lunoir），不要删**。
+- 本程序无服务、无驱动、不写 `HKLM`，清理不需要管理员权限。
+
 ### 测试
-- 单元测试 389 → **392**
+- 单元测试 389 → **392**（新增关联启动路径回归）
 
 ## [3.0.1] - 2026-09-13
 
