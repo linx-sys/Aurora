@@ -2,7 +2,7 @@
 
 > **本文档性质**：对 WorkBuddy 中关于本项目的**全部记忆、日志、评估与验证记录**做去重归类后的单一权威概览。
 > **整合来源**：`.workbuddy/memory/2026-09-08 ~ 09-10.md`、`.workbuddy-ai/memory/2026-09-11.md`、`.workbuddy/tmp_chatgpt_review.txt`（外部评审）、`outputs/Aurora-本地音乐播放器项目评估报告.md`（静态评估）、`outputs/Aurora-validation-2026-09-11.txt`（修复验证）、`docs/*.md`、`README.md`、`CHANGELOG.md`、git 历史与工作区实际代码。
-> **更新时间**：2026-09-11 17:30　**代码基线**：`develop` @ `658c40c`（已推送；工作区无未提交改动）｜已发布版本：`v3.0.0`（`main` @ `7b962c1`）。
+> **更新时间**：2026-09-13 00:50　**代码基线**：`main` = `develop` @ `4874694`（v3.0.1 发布提交）｜最近发布：**`v3.0.1`**（2026-09-13）。
 > **口径说明**：文中「已验证」表示有构建/测试/真机检查证据；「已落地未复验」表示代码已改但仅经静态确认；「未验证」表示仅有静态推断。
 > **测试数字**：当前实测 **389**（`dotnet test tests/Aurora.Tests.csproj`）；历史条目中的数字为该时点快照，不作当前值使用（口径规则见 CHANGELOG）。
 
@@ -200,7 +200,22 @@ D:\WorkSpace\Aurora\
 **⑤ 文档校准**：统一"测试数字口径"（当前状态类文档用实测值，历史条目保留当时值并标注），
 写入 CHANGELOG 口径说明，同步 README / ARCHITECTURE / DEVELOPMENT / ROADMAP / 本文档。
 
-### 6.4 ⚠️ 历史状态（已被 6.3 取代，保留供追溯）
+### 6.4 v3.0.1 发布记录（2026-09-13，已完成）
+
+- 版本号 3.0.0 → **3.0.1**（`src/AppInfo.cs`）；CHANGELOG `[Unreleased]` 定稿为 `[3.0.1] - 2026-09-13`。
+- 提交 `4874694`（release: v3.0.1——安装链路与状态一致性修复批次，含 `tools/machine-verify/` 三个真机验证脚本）。
+- 发布前检查：四步构建（主程序/卸载器/安装器/Portable）0 警告 0 错误；全量测试 **389/389**；
+  产物实测安装：清单与注册表 `DisplayVersion` 均为 3.0.1、22 个载荷文件齐全。
+- `develop` 推送 → `main` **fast-forward** 合并 → 附注 tag `v3.0.1` 推送。
+- CI：`main` push 运行 success；tag 运行 11 个步骤全部 success（构建/测试/双 publish/收产物/建 Release）。
+- Release 产物（https://github.com/linx-sys/Aurora/releases/tag/v3.0.1）：
+  `AuroraPlayer-Setup.exe` 29.7 MB · `Aurora-x64-Portable.exe` 83.6 MB · `Aurora-win64.zip` 109.7 MB · `Aurora-symbols.zip` 61.9 KB。
+- ⚠️ 升级路径：本机既有安装 `D:\Applications\Aurora`（v3.0.0，**无安装清单**）需**先卸载**再安装 v3.0.1，
+  或安装时选择新的专用空目录（见 §9.1）。
+- 环境备注：本机 Bash 子进程缺 `APPDATA` / `ProgramFiles` / `ProgramW6432` 等变量，
+  直接跑 dotnet 会报 NuGet `Value cannot be null. (Parameter 'path1')`，需显式补齐后再构建（见 §9.3）。
+
+### 6.5 ⚠️ 历史状态（保留供追溯）
 
 - `main` 与 `develop` 曾停在已发布的 `7b962c1`（v3.0.0），工作区曾有 **47 个文件修改（+2448 / −1142）+ 9 个未跟踪文件**；
 - 那批改动**现已提交并推送**（`develop` 至 `658c40c`），不再有"未提交修复"。
@@ -231,7 +246,7 @@ D:\WorkSpace\Aurora\
 | 2 | clean 全量构建 + 全量测试复验 | ✅ 已完成：8/8 零警告零错误；**389/389 通过**（过程中查出并修复安装事务重命名缺陷） |
 | 3 | 真机安装/升级/卸载/中断恢复 | ✅ 已完成（隔离目录，86/86 项检查通过；**未触碰你现有的 `D:\Applications\Aurora`**） |
 | 4 | 文档测试数字口径校准 | ✅ 已完成（CHANGELOG 写明口径；README/ARCHITECTURE/DEVELOPMENT/ROADMAP/本文档同步为 389） |
-| 5 | **发布决策** | ⬜ 待你拍板：是否将 `develop` 合回 `main` 并打 tag（CI 自动出四产物） |
+| 5 | **发布决策** | ✅ 已完成：2026-09-13 发布 **v3.0.1**（`main` = `develop` = `4874694`，CI 四产物齐全） |
 | 6 | 图形安装向导交互回归 | ⬜ 未做：本次只验证了静默安装路径（与图形路径共用 `RunInstall`），向导页面点击需人工过一遍 |
 | 7 | 真实声卡/设备拔插、DPI/多显示器、SMTC 实机 | ⬜ 未做 |
 | 8 | 你现有 `D:\Applications\Aurora`（v3.0.0，**无安装清单**）的迁移 | ⬜ 需先卸载再安装新版本（或装到新目录）——见 §9.1 |
@@ -312,6 +327,14 @@ D:\WorkSpace\Aurora\
   不要为了"让测试过"去缩短测试路径。
 - **改完最后一行代码必须重跑全量测试**：本批 14:26 的最后一次改码晚于 14:09 的全绿运行，
   于是"371/371 通过"的记录实际是过时结论，缺陷一直潜伏到本次 clean 复验才暴露。
+- **本机 Bash 子进程缺 Windows 目录环境变量**：缺 `APPDATA` / `ProgramFiles` / `ProgramFiles(x86)` / `ProgramW6432` 时，
+  `dotnet build/restore` 会报 `Value cannot be null. (Parameter 'path1')`（NuGet.targets）。
+  用 `env APPDATA='C:\Users\Jinwei\AppData\Roaming' ProgramFiles='C:\Program Files' ... dotnet ...` 补齐即可，
+  不必改系统环境（`outputs/verify_builds.py` 与 `tools/machine-verify/*` 都自带这套变量）。
+- **本机 `git fetch` 不写入 `origin/*` 远程跟踪引用**（命令报告 `[new branch] ... -> origin/develop`，
+  但 `.git/refs/remotes/origin/` 始终为空，`git log origin/develop` 会报 ambiguous 参数）。
+  验证远端状态请改用 `git ls-remote origin refs/heads/develop`，或用 `git push` 回显的 `<old>..<new>` 区间确认。
+  另：Bash 工具禁止调用 `powershell.exe`（安全策略），发布构建改用与 `build.ps1` 等价的四条 dotnet 命令。
 
 ---
 
