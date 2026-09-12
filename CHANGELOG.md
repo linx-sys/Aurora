@@ -4,11 +4,24 @@
 
 > **测试数字口径**：本文件"已发布版本"条目中的用例数记录**该版本发布时**的实测值；
 > 描述**当前状态**的文档（README / ARCHITECTURE / DEVELOPMENT / PROJECT_OVERVIEW）一律使用当前实测值。
-> 当前实测：**389 例**（`dotnet test tests/Aurora.Tests.csproj`，389 通过 / 0 失败 / 0 跳过）。
+> 当前实测：**392 例**（`dotnet test tests/Aurora.Tests.csproj`，392 通过 / 0 失败 / 0 跳过）。
+
+## [Unreleased]
+
+### 修复
+- **文件关联命令指向了 `.dll`**：`src/Assoc.cs` 用 `Assembly.GetExecutingAssembly().Location` 取自身路径，
+  而框架依赖应用里该属性返回 `AuroraPlayer.dll`（单文件发布下是空串），于是"打开方式 → Aurora"无法启动。
+  改用 `Environment.ProcessPath`（回退 `AppContext.BaseDirectory` + `AuroraPlayer.exe`），并补 3 例回归测试。
+
+### 测试
+- 单元测试 389 → **392**
 
 ## [3.0.1] - 2026-09-13
 
 ### 修复
+- **安装包补上 `unins.dll`**：v3.0.0 的 `installer.csproj` 漏嵌该文件，而 `unins.exe` 只是 apphost 桩，
+  导致其自带卸载器无法启动（报 `The application to execute does not exist: …\unins.dll`，退出码 154），
+  Geek Uninstaller 与"应用和功能"因共用 `UninstallString` 同样失败。受影响的旧安装需先手工清除（或先卸载旧版再装本版）。
 - **安装事务重命名缺陷**：`FILE_RENAME_INFO` 缓冲区未留 NUL 终止符，内核按终止符读取文件名字符串，
   会把分配区外的内存写进文件名（实测出现 `AuroraPlayer.exeon`、`replaced-<guid>乱码` 一类名字）；
   深层安装目录（状态目录名含 64 位 sha256）下重命名目标超过 MAX_PATH 时直接报 206。已补终止符并统一改用

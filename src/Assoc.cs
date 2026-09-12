@@ -6,7 +6,6 @@
  * ============================================================ */
 using System;
 using System.IO;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32;
@@ -65,6 +64,25 @@ namespace Aurora
             return "\"" + path + "\"";
         }
 
+        /// <summary>
+        /// 解析用于文件关联的可执行文件路径。
+        /// <para>
+        /// 不能用 <c>Assembly.Location</c>：框架依赖应用里它返回的是 <c>AuroraPlayer.dll</c>（单文件发布下为空串），
+        /// 会把关联命令写成 <c>"…\AuroraPlayer.dll" "%1"</c>，导致"打开方式 → Aurora"无法启动。
+        /// 正确来源是进程自身的可执行文件路径，回退到程序目录下的 apphost。
+        /// </para>
+        /// </summary>
+        internal static string ResolveExePath(string processPath, string baseDirectory)
+        {
+            if (!string.IsNullOrEmpty(processPath)) return processPath;
+            string dir = baseDirectory;
+            if (string.IsNullOrEmpty(dir)) dir = AppContext.BaseDirectory;
+            if (string.IsNullOrEmpty(dir)) return "";
+            return Path.Combine(dir, ExeName);
+        }
+
+        static string CurrentExePath() => ResolveExePath(Environment.ProcessPath, AppContext.BaseDirectory);
+
         /// <summary>注册全部 9 种格式的文件关联（当前用户）。</summary>
         public static void Register() { Register(null); }
 
@@ -73,7 +91,7 @@ namespace Aurora
         {
             try
             {
-                string exePath = Assembly.GetExecutingAssembly().Location;
+                string exePath = CurrentExePath();
                 Log("Register begin, exe=" + exePath);
                 if (string.IsNullOrEmpty(exePath)) { Log("empty exe path"); return; }
                 string openValue = QuotePath(exePath) + " " + FileParamToken();

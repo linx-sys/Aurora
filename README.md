@@ -95,7 +95,7 @@ AuroraPlayer.exe /unassociate   # 取消关联并清理注册表项
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1    # 4 步：主程序 → 卸载器 → 安装器 → Portable
-dotnet test tests/Aurora.Tests.csproj                 # 389 个单元测试
+dotnet test tests/Aurora.Tests.csproj                 # 392 个单元测试
 ```
 
 依赖：NAudio / NVorbis / Microsoft.Data.Sqlite 由 NuGet 锁定版本还原；Concentus（NuGet 未上架）随 `lib/` 提供，均为 MIT。CI（GitHub Actions）自动执行构建 + 测试，打 `v*` tag 自动发布 Release。
