@@ -6,7 +6,7 @@
 > 描述**当前状态**的文档（README / ARCHITECTURE / DEVELOPMENT / PROJECT_OVERVIEW）一律使用当前实测值。
 > 当前实测：**389 例**（`dotnet test tests/Aurora.Tests.csproj`，389 通过 / 0 失败 / 0 跳过）。
 
-## [Unreleased]
+## [3.0.1] - 2026-09-13
 
 ### 修复
 - **安装事务重命名缺陷**：`FILE_RENAME_INFO` 缓冲区未留 NUL 终止符，内核按终止符读取文件名字符串，
